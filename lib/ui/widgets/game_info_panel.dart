@@ -11,6 +11,7 @@ import 'package:flutter/material.dart';
 import '../../l10n/app_localizations.dart';
 import '../../models/piece_type.dart';
 import '../../models/move.dart';
+import 'board_position_label.dart';
 
 /// 游戏信息面板
 class GameInfoPanel extends StatelessWidget {
@@ -20,6 +21,7 @@ class GameInfoPanel extends StatelessWidget {
   final List<Move> moveHistory;
   final bool canUndo;
   final bool canRedo;
+  final bool flipBoard;
   final VoidCallback? onUndo;
   final VoidCallback? onRedo;
   final VoidCallback? onRestart;
@@ -36,6 +38,7 @@ class GameInfoPanel extends StatelessWidget {
     required this.moveHistory,
     required this.canUndo,
     required this.canRedo,
+    this.flipBoard = false,
     this.onUndo,
     this.onRedo,
     this.onRestart,
@@ -92,6 +95,7 @@ class GameInfoPanel extends StatelessWidget {
           // 移动历史
           _MoveHistorySection(
             moveHistory: moveHistory,
+            flipBoard: flipBoard,
           ),
           const SizedBox(height: 16),
 
@@ -290,9 +294,11 @@ class _PieceCounter extends StatelessWidget {
 /// 移动历史区域
 class _MoveHistorySection extends StatelessWidget {
   final List<Move> moveHistory;
+  final bool flipBoard;
 
   const _MoveHistorySection({
     required this.moveHistory,
+    required this.flipBoard,
   });
 
   @override
@@ -367,9 +373,13 @@ class _MoveHistorySection extends StatelessWidget {
                             ),
                           ),
                           const SizedBox(width: 4),
-                          Text(
-                            '${move.from} → ${move.to}',
-                            style: const TextStyle(fontSize: 12),
+                          Expanded(
+                            child: Text(
+                              '${formatBoardPositionLabel(l10n, move.from, flipBoard: flipBoard)}'
+                              ' → '
+                              '${formatBoardPositionLabel(l10n, move.to, flipBoard: flipBoard)}',
+                              style: const TextStyle(fontSize: 12),
+                            ),
                           ),
                           if (move.captureCount > 0)
                             Row(

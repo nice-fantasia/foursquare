@@ -13,6 +13,7 @@ import '../../models/move.dart';
 import '../../models/piece_type.dart';
 import '../../services/game_replay_service.dart';
 import '../widgets/themed_board_widget.dart';
+import '../widgets/board_position_label.dart';
 
 class GameReplayPage extends StatefulWidget {
   /// 移动历史
@@ -331,13 +332,15 @@ class _GameReplayPageState extends State<GameReplayPage> {
   }
 
   String _moveDescription(Move move, AppLocalizations l10n) {
+    final from = formatBoardPositionLabel(l10n, move.from);
+    final to = formatBoardPositionLabel(l10n, move.to);
     if (move.captureCount > 0) {
       return l10n.moveDescriptionCapture(
-        move.from.toString(),
-        move.to.toString(),
+        from,
+        to,
         move.captureCount,
       );
     }
-    return l10n.moveDescription(move.from.toString(), move.to.toString());
+    return l10n.moveDescription(from, to);
   }
 }
