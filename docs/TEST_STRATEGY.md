@@ -120,7 +120,7 @@ Windows 本机基础验证入口：
 
 ```powershell
 flutter test --no-pub --coverage
-flutter test integration_test
+flutter test -d <dedicated-device-id> integration_test
 flutter test test/integration/online_game_transport_real_server_test.dart --dart-define=RUN_ONLINE_REAL_SERVER_E2E=true --timeout 60s
 ```
 
