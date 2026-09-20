@@ -22,9 +22,12 @@ import 'evaluation.dart';
 class _TranspositionEntry {
   final int score;
   final int depth;
-  final DateTime timestamp;
 
-  _TranspositionEntry(this.score, this.depth, this.timestamp);
+  _TranspositionEntry(this.score, this.depth);
+}
+
+class _SearchTimeout implements Exception {
+  const _SearchTimeout();
 }
 
 /// Minimax AI实现（优化版）
@@ -39,6 +42,9 @@ class MinimaxAI extends AIPlayer {
 
   // 历史启发式（记录好的移动）
   final Map<String, int> _historyTable = {};
+  int _nodesEvaluated = 0;
+  Stopwatch? _searchStopwatch;
+  int _timeLimitMilliseconds = 0;
 
   // AI思考进度回调
   Function(double progress, String status)? _progressCallback;
@@ -55,11 +61,11 @@ class MinimaxAI extends AIPlayer {
   static int _getDepthForDifficulty(AIDifficulty difficulty) {
     switch (difficulty) {
       case AIDifficulty.easy:
-        return 3; // 从easy2层提升到3层
+        return 2;
       case AIDifficulty.medium:
         return 4; // 从med3层提升到4层
       case AIDifficulty.hard:
-        return 5; // 从hard4层提升到5层
+        return 6;
     }
   }
 
@@ -67,11 +73,11 @@ class MinimaxAI extends AIPlayer {
   static int _getTimeLimitForDifficulty(AIDifficulty difficulty) {
     switch (difficulty) {
       case AIDifficulty.easy:
-        return 500; // 0.5秒
+        return 100;
       case AIDifficulty.medium:
-        return 2000; // 2秒
+        return 500;
       case AIDifficulty.hard:
-        return 5000; // 5秒
+        return 1800;
     }
   }
 
@@ -105,7 +111,7 @@ class MinimaxAI extends AIPlayer {
   }
 
   /// 生成棋盘哈希值（用于置换表）
-  String _getBoardHash(BoardState board) {
+  String _getBoardHash(BoardState board, PieceType aiPlayer) {
     final buffer = StringBuffer();
     for (int y = 0; y < 4; y++) {
       for (int x = 0; x < 4; x++) {
@@ -120,6 +126,7 @@ class MinimaxAI extends AIPlayer {
       }
     }
     buffer.write(board.currentPlayer == PieceType.black ? 'B' : 'W');
+    buffer.write(aiPlayer == PieceType.black ? 'B' : 'W');
     return buffer.toString();
   }
 
@@ -136,9 +143,15 @@ class MinimaxAI extends AIPlayer {
       int priority = 0;
 
       // 1. 检查是否可以吃子（最高优先级）
-      final result = _engine.executeMove(board, move.from, move.to);
-      if (result.success && result.captured != null) {
-        priority += 1000; // 吃子移动优先级最高
+      final nextBoard = _engine.simulateMove(board, move.from, move.to);
+      if (nextBoard != null) {
+        final capturedCount = board.getPieceCount(player.getOpponent()) -
+            nextBoard.getPieceCount(player.getOpponent());
+        priority += capturedCount * 1000;
+        final gameResult = _engine.checkGameOver(nextBoard);
+        if (gameResult?.winner == player) {
+          priority += 100000;
+        }
       }
 
       // 2. 检查历史启发式
@@ -160,8 +173,8 @@ class MinimaxAI extends AIPlayer {
 
   @override
   Future<AIMoveResult?> selectMove(BoardState board) async {
-    final startTime = DateTime.now();
-    int nodesEvaluated = 0;
+    final stopwatch = Stopwatch()..start();
+    _nodesEvaluated = 0;
 
     // 清理置换表（避免内存过大）
     if (_transpositionTable.length > _maxTranspositionTableSize) {
@@ -181,35 +194,24 @@ class MinimaxAI extends AIPlayer {
 
     if (moveList.isEmpty) return null;
 
-    // 简单难度：10%概率随机移动（从30%降低）
-    if (difficulty == AIDifficulty.easy && _random.nextDouble() < 0.1) {
-      final randomMove = moveList[_random.nextInt(moveList.length)];
-      _progressCallback?.call(1.0, '完成，随机选择了 1 个候选移动');
-      return AIMoveResult(
-        from: randomMove.from,
-        to: randomMove.to,
-        score: 0,
-        nodesEvaluated: 1,
-        thinkingTime: DateTime.now().difference(startTime),
-      );
-    }
-
     // 动态调整深度
     final maxDepth = _getDynamicDepth(board);
     final timeLimit = _getTimeLimitForDifficulty(difficulty);
-
-    Position? bestFrom;
-    Position? bestTo;
-    int bestScore = -9999999;
+    _searchStopwatch = stopwatch;
+    _timeLimitMilliseconds = timeLimit;
 
     // 对移动进行排序
     final sortedMoves = _sortMoves(moveList, board, board.currentPlayer);
 
+    Position? bestFrom = sortedMoves.first.from;
+    Position? bestTo = sortedMoves.first.to;
+    int bestScore = -9999999;
+    var completedScores = <_ScoredMove>[];
+
     // 迭代加深搜索（从深度1开始，逐步增加）
     for (int depth = 1; depth <= maxDepth; depth++) {
       // 检查是否超时
-      final elapsed = DateTime.now().difference(startTime);
-      if (elapsed.inMilliseconds > timeLimit) {
+      if (stopwatch.elapsedMilliseconds >= timeLimit) {
         break;
       }
 
@@ -219,44 +221,82 @@ class MinimaxAI extends AIPlayer {
         '搜索深度 $depth/$maxDepth',
       );
 
-      for (final move in sortedMoves) {
-        final result = _engine.executeMove(board, move.from, move.to);
-        if (!result.success || result.newBoard == null) continue;
+      Position? iterationBestFrom;
+      Position? iterationBestTo;
+      int iterationBestScore = -9999999;
+      final iterationScores = <_ScoredMove>[];
 
-        nodesEvaluated++;
-        final score = -_minimax(
-          result.newBoard!,
-          depth - 1,
-          -9999999,
-          9999999,
-          false,
-          board.currentPlayer,
-        );
+      try {
+        for (final move in sortedMoves) {
+          _checkDeadline();
+          final nextBoard = _engine.simulateMove(board, move.from, move.to);
+          if (nextBoard == null) continue;
 
-        if (score > bestScore) {
-          bestScore = score;
-          bestFrom = move.from;
-          bestTo = move.to;
+          final score = _minimax(
+            nextBoard,
+            depth - 1,
+            -9999999,
+            9999999,
+            false,
+            board.currentPlayer,
+          );
+          iterationScores.add(_ScoredMove(move, score));
 
-          // 更新历史表
-          final historyKey =
-              '${move.from.x},${move.from.y}-${move.to.x},${move.to.y}';
-          _historyTable[historyKey] = (_historyTable[historyKey] ?? 0) + depth;
+          if (score > iterationBestScore) {
+            iterationBestScore = score;
+            iterationBestFrom = move.from;
+            iterationBestTo = move.to;
+
+            // 更新历史表
+            final historyKey =
+                '${move.from.x},${move.from.y}-${move.to.x},${move.to.y}';
+            _historyTable[historyKey] =
+                (_historyTable[historyKey] ?? 0) + depth;
+          }
         }
+      } on _SearchTimeout {
+        break;
+      }
+
+      if (iterationBestFrom != null && iterationBestTo != null) {
+        bestScore = iterationBestScore;
+        bestFrom = iterationBestFrom;
+        bestTo = iterationBestTo;
+        completedScores = iterationScores;
       }
     }
 
     if (bestFrom == null || bestTo == null) return null;
 
+    if (difficulty == AIDifficulty.easy && completedScores.length > 1) {
+      completedScores.sort((a, b) => b.priority.compareTo(a.priority));
+      final winningMoves = completedScores
+          .where((candidate) => candidate.priority >= 10000)
+          .toList(growable: false);
+      final nonLosingMoves = completedScores
+          .where((candidate) => candidate.priority > -10000)
+          .toList(growable: false);
+      final rankedPool = winningMoves.isNotEmpty
+          ? winningMoves
+          : nonLosingMoves.isNotEmpty
+              ? nonLosingMoves
+              : completedScores;
+      final candidates = rankedPool.take(min(3, rankedPool.length)).toList();
+      final selected = candidates[_random.nextInt(candidates.length)];
+      bestFrom = selected.move.from;
+      bestTo = selected.move.to;
+      bestScore = selected.priority;
+    }
+
     // 完成进度
-    _progressCallback?.call(1.0, '完成，评估了 $nodesEvaluated 个节点');
+    _progressCallback?.call(1.0, '完成，评估了 $_nodesEvaluated 个节点');
 
     return AIMoveResult(
       from: bestFrom,
       to: bestTo,
       score: bestScore,
-      nodesEvaluated: nodesEvaluated,
-      thinkingTime: DateTime.now().difference(startTime),
+      nodesEvaluated: _nodesEvaluated,
+      thinkingTime: stopwatch.elapsed,
     );
   }
 
@@ -268,8 +308,11 @@ class MinimaxAI extends AIPlayer {
     bool isMaximizing,
     PieceType aiPlayer,
   ) {
+    _checkDeadline();
+    _nodesEvaluated++;
+
     // 检查置换表
-    final boardHash = _getBoardHash(board);
+    final boardHash = _getBoardHash(board, aiPlayer);
     final cached = _transpositionTable[boardHash];
     if (cached != null && cached.depth >= depth) {
       return cached.score;
@@ -279,16 +322,15 @@ class MinimaxAI extends AIPlayer {
     final gameResult = _engine.checkGameOver(board);
     if (gameResult != null) {
       final score = gameResult.winner == aiPlayer
-          ? 10000 + depth // AI获胜
+          ? 10000 // AI获胜
           : gameResult.winner == aiPlayer.getOpponent()
-              ? -10000 - depth // AI失败
+              ? -10000 // AI失败
               : 0; // 平局
 
       // 存入置换表
       _transpositionTable[boardHash] = _TranspositionEntry(
         score,
         depth,
-        DateTime.now(),
       );
       return score;
     }
@@ -299,7 +341,6 @@ class MinimaxAI extends AIPlayer {
       _transpositionTable[boardHash] = _TranspositionEntry(
         score,
         0,
-        DateTime.now(),
       );
       return score;
     }
@@ -310,7 +351,6 @@ class MinimaxAI extends AIPlayer {
       _transpositionTable[boardHash] = _TranspositionEntry(
         score,
         depth,
-        DateTime.now(),
       );
       return score;
     }
@@ -327,42 +367,70 @@ class MinimaxAI extends AIPlayer {
     final sortedMoves = _sortMoves(moveList, board, board.currentPlayer);
 
     int finalScore;
+    var searchWasCutOff = false;
     if (isMaximizing) {
       int maxScore = -9999999;
       for (final move in sortedMoves) {
-        final result = _engine.executeMove(board, move.from, move.to);
-        if (!result.success || result.newBoard == null) continue;
+        final nextBoard = _engine.simulateMove(board, move.from, move.to);
+        if (nextBoard == null) continue;
 
-        final score =
-            _minimax(result.newBoard!, depth - 1, alpha, beta, false, aiPlayer);
+        final score = _minimax(
+          nextBoard,
+          depth - 1,
+          alpha,
+          beta,
+          false,
+          aiPlayer,
+        );
         maxScore = max(maxScore, score);
         alpha = max(alpha, score);
-        if (beta <= alpha) break; // Beta剪枝
+        if (beta <= alpha) {
+          searchWasCutOff = true;
+          break;
+        }
       }
       finalScore = maxScore;
     } else {
       int minScore = 9999999;
       for (final move in sortedMoves) {
-        final result = _engine.executeMove(board, move.from, move.to);
-        if (!result.success || result.newBoard == null) continue;
+        final nextBoard = _engine.simulateMove(board, move.from, move.to);
+        if (nextBoard == null) continue;
 
-        final score =
-            _minimax(result.newBoard!, depth - 1, alpha, beta, true, aiPlayer);
+        final score = _minimax(
+          nextBoard,
+          depth - 1,
+          alpha,
+          beta,
+          true,
+          aiPlayer,
+        );
         minScore = min(minScore, score);
         beta = min(beta, score);
-        if (beta <= alpha) break; // Alpha剪枝
+        if (beta <= alpha) {
+          searchWasCutOff = true;
+          break;
+        }
       }
       finalScore = minScore;
     }
 
     // 存入置换表
-    _transpositionTable[boardHash] = _TranspositionEntry(
-      finalScore,
-      depth,
-      DateTime.now(),
-    );
+    if (!searchWasCutOff) {
+      _transpositionTable[boardHash] = _TranspositionEntry(
+        finalScore,
+        depth,
+      );
+    }
 
     return finalScore;
+  }
+
+  void _checkDeadline() {
+    final stopwatch = _searchStopwatch;
+    if (stopwatch != null &&
+        stopwatch.elapsedMilliseconds >= _timeLimitMilliseconds) {
+      throw const _SearchTimeout();
+    }
   }
 }
 

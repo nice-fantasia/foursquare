@@ -11,6 +11,7 @@ import 'dart:math';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:foursquare/ai/minimax_ai.dart';
 import 'package:foursquare/ai/ai_player.dart';
+import 'package:foursquare/ai/evaluation.dart';
 import 'package:foursquare/engine/game_engine.dart';
 import 'package:foursquare/models/board_state.dart';
 import 'package:foursquare/models/piece_type.dart';
@@ -29,6 +30,17 @@ BoardState createEmptyBoard({PieceType currentPlayer = PieceType.black}) {
 }
 
 void main() {
+  group('BoardEvaluator', () {
+    test('同一局面对双方的评分应该互为相反数', () {
+      final board = BoardState.initial();
+
+      final blackScore = BoardEvaluator.evaluate(board, PieceType.black);
+      final whiteScore = BoardEvaluator.evaluate(board, PieceType.white);
+
+      expect(blackScore, -whiteScore);
+    });
+  });
+
   group('MinimaxAI 基础功能', () {
     test('应该创建正确难度的AI', () {
       final easyAI = MinimaxAI(AIDifficulty.easy);
@@ -50,6 +62,25 @@ void main() {
   });
 
   group('MinimaxAI 移动选择', () {
+    test('简单难度应该在合理候选中产生可重复的变化', () async {
+      final board = BoardState.initial().switchPlayer();
+      final firstChoice = await MinimaxAI(
+        AIDifficulty.easy,
+        random: _CandidateRandom(pickLast: false),
+      ).selectMove(board);
+      final lastChoice = await MinimaxAI(
+        AIDifficulty.easy,
+        random: _CandidateRandom(pickLast: true),
+      ).selectMove(board);
+
+      expect(firstChoice, isNotNull);
+      expect(lastChoice, isNotNull);
+      expect(
+        (firstChoice!.from, firstChoice.to),
+        isNot((lastChoice!.from, lastChoice.to)),
+      );
+    });
+
     test('初始棋盘应该能选择合法移动', () async {
       final ai = MinimaxAI(AIDifficulty.easy);
       final board = BoardState.initial().switchPlayer(); // 切换到白方
@@ -152,7 +183,7 @@ void main() {
       expect(callCount, equals(0));
     });
 
-    test('简单难度随机早退也报告完成进度', () async {
+    test('简单难度选择合理候选后也报告完成进度', () async {
       final ai = MinimaxAI(
         AIDifficulty.easy,
         random: _AlwaysRandomBranch(),
@@ -166,13 +197,40 @@ void main() {
 
       final result = await ai.selectMove(BoardState.initial().switchPlayer());
 
-      expect(result?.nodesEvaluated, 1);
-      expect(progressUpdates, [1.0]);
-      expect(statusUpdates.single, contains('完成'));
+      expect(result?.nodesEvaluated, greaterThan(1));
+      expect(progressUpdates.last, 1.0);
+      expect(statusUpdates.any((status) => status.contains('搜索深度')), isTrue);
+      expect(statusUpdates.last, contains('完成'));
     });
   });
 
   group('MinimaxAI 性能测试', () {
+    test('三档难度应该使用清晰分离的搜索深度', () async {
+      final reachedDepths = <AIDifficulty, int>{};
+      for (final difficulty in AIDifficulty.values) {
+        final ai = MinimaxAI(
+          difficulty,
+          random: _NeverRandomBranch(),
+        );
+        ai.setProgressCallback((progress, status) {
+          final match = RegExp(r'搜索深度 (\d+)/(\d+)').firstMatch(status);
+          if (match != null) {
+            reachedDepths[difficulty] = int.parse(match.group(2)!);
+          }
+        });
+        await ai.selectMove(BoardState.initial().switchPlayer());
+      }
+
+      expect(
+        reachedDepths,
+        {
+          AIDifficulty.easy: 2,
+          AIDifficulty.medium: 4,
+          AIDifficulty.hard: 6,
+        },
+      );
+    });
+
     test('简单难度应该在100ms内完成', () async {
       final ai = MinimaxAI(AIDifficulty.easy);
       final board = BoardState.initial().switchPlayer();
@@ -222,9 +280,97 @@ void main() {
       );
       expect(mediumResult.nodesEvaluated, lessThan(hardResult!.nodesEvaluated));
     });
+
+    test('nodesEvaluated应该包含递归搜索节点', () async {
+      final result = await MinimaxAI(AIDifficulty.hard)
+          .selectMove(BoardState.initial().switchPlayer());
+
+      expect(result, isNotNull);
+      expect(result!.nodesEvaluated, greaterThan(24));
+    });
   });
 
   group('MinimaxAI 战术能力', () {
+    test('中等难度应该执行立即获胜的吃子移动', () async {
+      final ai = MinimaxAI(AIDifficulty.medium);
+      final board = createEmptyBoard(currentPlayer: PieceType.white)
+          .setPiece(const Position(0, 0), PieceType.white)
+          .setPiece(const Position(1, 1), PieceType.white)
+          .setPiece(const Position(0, 3), PieceType.white)
+          .setPiece(const Position(2, 0), PieceType.black)
+          .setPiece(const Position(3, 3), PieceType.black);
+
+      final move = await ai.selectMove(board);
+
+      expect(move, isNotNull);
+      final result = GameEngine().executeMove(board, move!.from, move.to);
+      expect(result.gameOver, isTrue);
+      expect(result.gameResult?.winner, PieceType.white);
+    });
+
+    test('中等难度应该避开让对手下一手获胜的移动', () async {
+      final ai = MinimaxAI(AIDifficulty.medium);
+      final board = createEmptyBoard(currentPlayer: PieceType.white)
+          .setPiece(const Position(1, 0), PieceType.black)
+          .setPiece(const Position(2, 0), PieceType.black)
+          .setPiece(const Position(0, 1), PieceType.black)
+          .setPiece(const Position(3, 1), PieceType.black)
+          .setPiece(const Position(2, 2), PieceType.white)
+          .setPiece(const Position(1, 3), PieceType.white);
+
+      final move = await ai.selectMove(board);
+
+      expect(move, isNotNull);
+      final result = GameEngine().executeMove(board, move!.from, move.to);
+      expect(result.success, isTrue);
+      expect(_hasImmediateWinningMove(result.newBoard!), isFalse);
+    });
+
+    test('简单难度有安全走法时不应该直接送出下一手败局', () async {
+      final ai = MinimaxAI(
+        AIDifficulty.easy,
+        random: _CandidateRandom(pickLast: true),
+      );
+      final board = createEmptyBoard(currentPlayer: PieceType.black)
+          .setPiece(const Position(0, 1), PieceType.black)
+          .setPiece(const Position(3, 1), PieceType.black)
+          .setPiece(const Position(2, 1), PieceType.white)
+          .setPiece(const Position(0, 2), PieceType.white)
+          .setPiece(const Position(1, 2), PieceType.white)
+          .setPiece(const Position(2, 2), PieceType.white);
+
+      final move = await ai.selectMove(board);
+
+      expect(move, isNotNull);
+      final result = GameEngine().executeMove(board, move!.from, move.to);
+      expect(_hasImmediateWinningMove(result.newBoard!), isFalse);
+    });
+
+    test('困难难度应该看到中等难度搜索范围之外的强制获胜路线', () async {
+      final board = createEmptyBoard(currentPlayer: PieceType.black)
+          .setPiece(const Position(0, 0), PieceType.black)
+          .setPiece(const Position(2, 0), PieceType.black)
+          .setPiece(const Position(1, 1), PieceType.black)
+          .setPiece(const Position(1, 2), PieceType.black)
+          .setPiece(const Position(0, 1), PieceType.white)
+          .setPiece(const Position(1, 3), PieceType.white)
+          .setPiece(const Position(2, 3), PieceType.white);
+
+      final mediumMove = await MinimaxAI(AIDifficulty.medium).selectMove(board);
+      final hardMove = await MinimaxAI(AIDifficulty.hard).selectMove(board);
+
+      expect(mediumMove, isNotNull);
+      expect(hardMove, isNotNull);
+      final mediumBoard = GameEngine()
+          .executeMove(board, mediumMove!.from, mediumMove.to)
+          .newBoard!;
+      final hardBoard = GameEngine()
+          .executeMove(board, hardMove!.from, hardMove.to)
+          .newBoard!;
+      expect(_canForceWin(hardBoard, PieceType.black, 5), isTrue);
+      expect(_canForceWin(mediumBoard, PieceType.black, 5), isFalse);
+    });
+
     test('新吃子规则局面中应返回当前方的合法移动', () async {
       final ai = MinimaxAI(AIDifficulty.medium);
 
@@ -286,11 +432,8 @@ void main() {
       final result2 = await ai.selectMove(board);
       final nodes2 = result2!.nodesEvaluated;
 
-      // 第二次搜索应该更快（评估节点数可能相同或更少）
-      // 注意：这个测试假设置换表在两次调用之间保持
-      expect(nodes2, greaterThan(0));
-      expect(result1!.from, isNotNull);
-      expect(result2.from, isNotNull);
+      expect(nodes2, lessThanOrEqualTo(result1!.nodesEvaluated));
+      expect((result2.from, result2.to), (result1.from, result1.to));
     });
 
     test('迭代加深应该逐步增加深度', () async {
@@ -328,4 +471,68 @@ final class _AlwaysRandomBranch implements Random {
 
   @override
   int nextInt(int max) => 0;
+}
+
+final class _NeverRandomBranch implements Random {
+  @override
+  bool nextBool() => true;
+
+  @override
+  double nextDouble() => 1;
+
+  @override
+  int nextInt(int max) => max - 1;
+}
+
+final class _CandidateRandom implements Random {
+  _CandidateRandom({required this.pickLast});
+
+  final bool pickLast;
+
+  @override
+  bool nextBool() => pickLast;
+
+  @override
+  double nextDouble() => 0.5;
+
+  @override
+  int nextInt(int max) => pickLast ? max - 1 : 0;
+}
+
+bool _hasImmediateWinningMove(BoardState board) {
+  final engine = GameEngine();
+  final possibleMoves = engine.getPossibleMoves(board, board.currentPlayer);
+  for (final entry in possibleMoves.entries) {
+    for (final to in entry.value) {
+      final result = GameEngine().executeMove(board, entry.key, to);
+      if (result.gameOver && result.gameResult?.winner == board.currentPlayer) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool _canForceWin(BoardState board, PieceType player, int remainingDepth) {
+  final engine = GameEngine();
+  final result = engine.checkGameOver(board);
+  if (result != null) {
+    return result.winner == player;
+  }
+  if (remainingDepth == 0) {
+    return false;
+  }
+
+  final childResults = <bool>[];
+  final possibleMoves = engine.getPossibleMoves(board, board.currentPlayer);
+  for (final entry in possibleMoves.entries) {
+    for (final to in entry.value) {
+      final next = engine.simulateMove(board, entry.key, to)!;
+      childResults.add(_canForceWin(next, player, remainingDepth - 1));
+    }
+  }
+  if (board.currentPlayer == player) {
+    return childResults.any((canWin) => canWin);
+  }
+  return childResults.isNotEmpty && childResults.every((canWin) => canWin);
 }

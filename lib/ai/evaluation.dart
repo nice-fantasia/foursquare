@@ -58,10 +58,14 @@ class BoardEvaluator {
     int score = 0;
     final isWhite = player == PieceType.white;
     final myPieces = isWhite ? board.whitePieces : board.blackPieces;
+    final opponentPieces = isWhite ? board.blackPieces : board.whitePieces;
 
     for (final pos in myPieces) {
       // 中心位置更有价值
       score += _getPositionValue(pos);
+    }
+    for (final pos in opponentPieces) {
+      score -= _getPositionValue(pos);
     }
 
     return score;
@@ -85,12 +89,21 @@ class BoardEvaluator {
 
   /// 评估移动能力
   static int _evaluateMobility(BoardState board, PieceType player) {
-    // 可移动的棋子数量
-    int mobility = 0;
     final isWhite = player == PieceType.white;
     final myPieces = isWhite ? board.whitePieces : board.blackPieces;
+    final opponentPieces = isWhite ? board.blackPieces : board.whitePieces;
 
-    for (final pos in myPieces) {
+    return (_countAvailableMoves(board, myPieces) -
+            _countAvailableMoves(board, opponentPieces)) *
+        10;
+  }
+
+  static int _countAvailableMoves(
+    BoardState board,
+    Iterable<Position> pieces,
+  ) {
+    var mobility = 0;
+    for (final pos in pieces) {
       final adjacent = pos.getAdjacentPositions();
       for (final adj in adjacent) {
         if (board.getPiece(adj) == PieceType.empty) {
@@ -98,8 +111,7 @@ class BoardEvaluator {
         }
       }
     }
-
-    return mobility * 10; // 从5增加到10
+    return mobility;
   }
 
   /// 评估三子连线威胁（新增）
@@ -125,24 +137,8 @@ class BoardEvaluator {
 
   /// 评估防守价值（新增）
   static int _evaluateDefense(BoardState board, PieceType player) {
-    int score = 0;
     final opponent = player.getOpponent();
-    final isWhite = opponent == PieceType.white;
-    final oppPieces = isWhite ? board.whitePieces : board.blackPieces;
-
-    // 检查对手的威胁，如果有两子连线，需要防守
-    for (final piece in oppPieces) {
-      // 横向检查
-      if (_hasTwoInRow(board, piece, 1, 0, opponent)) {
-        score += 150; // 防守价值
-      }
-      // 纵向检查
-      if (_hasTwoInRow(board, piece, 0, 1, opponent)) {
-        score += 150;
-      }
-    }
-
-    return score;
+    return -_evaluateThreats(board, opponent);
   }
 
   /// 检查指定方向是否有两子连线
