@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import '../../ai/voice_game_intent.dart';
 import '../../bloc/game_bloc.dart';
 import '../../bloc/game_event.dart';
@@ -28,24 +30,32 @@ abstract interface class GameVoiceSession {
 
   Future<void> listenOnce();
 
+  Future<void> replayPendingReply();
+
   Future<void> updateAvailability({required bool appIsActive});
 
   Future<void> dispose();
 }
 
-/// Sends typed position intents into [GameBloc] without claiming an outcome.
+/// Sends typed intents into [GameBloc] and narrates only committed full moves.
 ///
-/// Ordinary-game narration needs a separate committed-outcome boundary. Until
-/// that exists, this session deliberately returns no success speech and ignores
-/// control actions whose product semantics have not been defined for PVE.
+/// Position selection remains silent. Full moves wait for a matching
+/// authoritative state before reporting success. Control actions whose product
+/// semantics have not been defined for PVE remain ignored.
 final class BlocGameVoiceSession implements GameVoiceSession {
   final GameBloc _bloc;
   final PieceType _controlledPlayer;
+  final Duration _committedOutcomeTimeout;
   late final VoiceInteractionController _voice;
+  late final StreamSubscription<VoiceInteractionState> _voiceStateSubscription;
   late final VoiceGameIntentDispatcher _dispatcher;
   Future<void>? _enableOperation;
   Future<void> _availabilityUpdates = Future<void>.value();
   bool _appIsActive = true;
+  bool _awaitingCommittedOutcome = false;
+  bool _committedReplyInFlight = false;
+  String? _committedReplyMatchId;
+  _CommittedMoveWaiter? _activeCommittedMoveWaiter;
 
   BlocGameVoiceSession({
     required GameBloc bloc,
@@ -53,8 +63,10 @@ final class BlocGameVoiceSession implements GameVoiceSession {
     required MicrophonePermissionPort permission,
     required VoiceRecognitionPort recognition,
     required VoiceSynthesisPort synthesis,
+    Duration committedOutcomeTimeout = const Duration(seconds: 2),
   })  : _bloc = bloc,
-        _controlledPlayer = controlledPlayer {
+        _controlledPlayer = controlledPlayer,
+        _committedOutcomeTimeout = committedOutcomeTimeout {
     _dispatcher = VoiceGameIntentDispatcher(
       addGameEvent: _bloc.add,
       onControlAction: (_) {},
@@ -66,6 +78,7 @@ final class BlocGameVoiceSession implements GameVoiceSession {
       interpret: VoiceGameIntentParser.parse,
       onIntent: _handleIntent,
     );
+    _voiceStateSubscription = _voice.states.listen(_onVoiceStateChanged);
   }
 
   @override
@@ -102,15 +115,33 @@ final class BlocGameVoiceSession implements GameVoiceSession {
   }
 
   @override
+  Future<void> replayPendingReply() async {
+    if (!_appIsActive || !_committedReplyInFlight) return;
+    await _voice.replayPendingReply();
+  }
+
+  @override
   Future<void> updateAvailability({required bool appIsActive}) async {
     _appIsActive = appIsActive;
     final requestedActive = appIsActive;
     _availabilityUpdates = _availabilityUpdates.then((_) async {
+      if (_committedReplyInFlight &&
+          _committedReplyMatchId != null &&
+          _bloc.state.matchId != _committedReplyMatchId) {
+        _committedReplyInFlight = false;
+        _committedReplyMatchId = null;
+        await _voice.discardPendingReply();
+      }
       if (!requestedActive) {
         await _voice.interrupt();
         return;
       }
-      if (!_appIsActive || !canAcceptInput) {
+      if (!_appIsActive) {
+        await _voice.interrupt();
+        return;
+      }
+      if (_awaitingCommittedOutcome || _committedReplyInFlight) return;
+      if (!canAcceptInput) {
         await _voice.interrupt();
         return;
       }
@@ -128,12 +159,88 @@ final class BlocGameVoiceSession implements GameVoiceSession {
   }
 
   @override
-  Future<void> dispose() => _voice.dispose();
+  Future<void> dispose() async {
+    _committedReplyInFlight = false;
+    _committedReplyMatchId = null;
+    _awaitingCommittedOutcome = false;
+    final waiter = _activeCommittedMoveWaiter;
+    _activeCommittedMoveWaiter = null;
+    if (waiter != null) await waiter.cancel();
+    await _voiceStateSubscription.cancel();
+    await _voice.dispose();
+  }
 
-  VoiceInteractionReply? _handleIntent(VoiceGameIntent intent) {
+  Future<VoiceInteractionReply?> _handleIntent(VoiceGameIntent intent) async {
     if (!canAcceptInput) return null;
+    if (intent case VoiceMoveIntent(:final from, :final to)) {
+      final before = _bloc.state;
+      if (before is! GamePlaying) return null;
+      final expectedMoveCount = before.moveHistory.length + 1;
+      final waiter = _CommittedMoveWaiter(
+        states: _bloc.stream,
+        timeout: _committedOutcomeTimeout,
+        matches: (state) {
+          final move = state.lastMove;
+          return state.moveHistory.length == expectedMoveCount &&
+              move != null &&
+              move.from == from &&
+              move.to == to &&
+              move.player == _controlledPlayer;
+        },
+      );
+      _activeCommittedMoveWaiter = waiter;
+
+      _awaitingCommittedOutcome = true;
+      try {
+        _dispatcher.dispatch(intent);
+        final committed = await waiter.result;
+        if (committed == null) {
+          if (!canAcceptInput) unawaited(_voice.interrupt());
+          return null;
+        }
+        if (!_appIsActive) return null;
+        if (committed is GameOver) {
+          final winner = committed.gameResult?.winner;
+          _committedReplyInFlight = true;
+          _committedReplyMatchId = before.matchId;
+          return VoiceInteractionReply(
+            winner == _controlledPlayer
+                ? '移动成功，你获胜了'
+                : winner == null
+                    ? '移动成功，本局平局'
+                    : '移动成功，本局结束',
+          );
+        }
+        final captureCount = committed.lastMove?.captureCount ?? 0;
+        _committedReplyInFlight = true;
+        _committedReplyMatchId = before.matchId;
+        return VoiceInteractionReply(
+          switch (captureCount) {
+            1 => '移动成功，吃掉一枚棋子',
+            2 => '移动成功，吃掉两枚棋子',
+            _ => '移动成功',
+          },
+        );
+      } finally {
+        if (identical(_activeCommittedMoveWaiter, waiter)) {
+          _activeCommittedMoveWaiter = null;
+        }
+        await waiter.cancel();
+        _awaitingCommittedOutcome = false;
+      }
+    }
     _dispatcher.dispatch(intent);
     return null;
+  }
+
+  void _onVoiceStateChanged(VoiceInteractionState state) {
+    if (!_committedReplyInFlight ||
+        state.phase != VoiceInteractionPhase.ready) {
+      return;
+    }
+    _committedReplyInFlight = false;
+    _committedReplyMatchId = null;
+    if (!canAcceptInput) unawaited(_voice.interrupt());
   }
 
   Future<void> _runEnable() {
@@ -148,6 +255,42 @@ final class BlocGameVoiceSession implements GameVoiceSession {
     });
     _enableOperation = operation;
     return operation;
+  }
+}
+
+final class _CommittedMoveWaiter {
+  final Completer<GameState?> _outcome = Completer<GameState?>();
+  late final Timer _timeout;
+  late final StreamSubscription<GameState> _subscription;
+  bool _cancelled = false;
+
+  _CommittedMoveWaiter({
+    required Stream<GameState> states,
+    required Duration timeout,
+    required bool Function(GameState state) matches,
+  }) {
+    _timeout = Timer(timeout, () => _complete(null));
+    _subscription = states.listen(
+      (state) {
+        if (matches(state)) _complete(state);
+      },
+      onError: (_, __) => _complete(null),
+      onDone: () => _complete(null),
+    );
+  }
+
+  Future<GameState?> get result => _outcome.future;
+
+  Future<void> cancel() async {
+    if (_cancelled) return;
+    _cancelled = true;
+    _timeout.cancel();
+    _complete(null);
+    await _subscription.cancel();
+  }
+
+  void _complete(GameState? state) {
+    if (!_outcome.isCompleted) _outcome.complete(state);
   }
 }
 

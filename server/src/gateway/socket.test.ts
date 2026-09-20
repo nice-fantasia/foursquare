@@ -4,6 +4,9 @@ import test from 'node:test';
 
 import { createSocketGateway } from './socket';
 import type { MatchmakingResult } from '../game/room_manager';
+import type { FinishedMatchRecord } from '../persistence/finished_match_record';
+import { InMemoryMatchOutboxRepository } from '../persistence/match_outbox';
+import { MatchOutboxWorker } from '../persistence/match_outbox_worker';
 import type { GameState, Player, Room } from '../types/game';
 import type {
     AuthoritativeSnapshot,
@@ -168,13 +171,16 @@ const createRoom = (firstSocketId = 'socket-a'): Room => ({
 const setup = () => {
     const io = new FakeIo();
     const manager = new FakeRoomManager();
-    const persisted: Room[] = [];
+    const persisted: FinishedMatchRecord[] = [];
     createSocketGateway(
         io,
         manager,
-        async (room) => {
-            persisted.push(room);
+        async (record) => {
+            persisted.push(record);
+            return 'enqueued' as const;
         },
+        () => undefined,
+        () => 70_000,
     );
     return { io, manager, persisted };
 };
@@ -519,7 +525,15 @@ test('timeout or disconnect completion broadcasts and persists exactly once', ()
         io.roomEvents.filter((event) => event.event === 'game_over').length,
         1,
     );
-    assert.deepEqual(persisted, [room]);
+    assert.equal(persisted.length, 1);
+    assert.equal(persisted[0].matchId, room.id);
+    assert.equal(persisted[0].startedAtEpochMs, room.createdAt);
+    assert.equal(persisted[0].finishedAtEpochMs, 70_000);
+    assert.deepEqual(persisted[0].players, [
+        { identityId: 'player-aaaa', color: 'black' },
+        { identityId: 'player-bbbb', color: 'white' },
+    ]);
+    assert.equal(Object.isFrozen(persisted[0]), true);
 });
 
 test('persistence keeps retrying without rebroadcasting game over', async () => {
@@ -527,16 +541,23 @@ test('persistence keeps retrying without rebroadcasting game over', async () => 
     const manager = new FakeRoomManager();
     const retries: Array<{ callback: () => void; delayMs: number }> = [];
     let attempts = 0;
+    let now = 70_000;
+    const attemptedRecords: FinishedMatchRecord[] = [];
     createSocketGateway(
         io,
         manager,
-        async () => {
+        async (record) => {
             attempts += 1;
+            attemptedRecords.push(record);
             if (attempts < 4) throw new Error('database unavailable');
+            return 'enqueued' as const;
         },
         (callback, delayMs) => {
             retries.push({ callback, delayMs });
         },
+        () => now,
+        () => undefined,
+        () => 0.5,
     );
     const socket = new FakeSocket('socket-a');
     const room = createRoom();
@@ -552,33 +573,353 @@ test('persistence keeps retrying without rebroadcasting game over', async () => 
 
     manager.emit('game_finished', { roomId: room.id, state: room.gameState });
     manager.emit('game_finished', { roomId: room.id, state: room.gameState });
-    await Promise.resolve();
+    await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(attempts, 1);
     assert.equal(retries[0].delayMs, 1_000);
 
+    now = 80_000;
     retries.shift()!.callback();
-    await Promise.resolve();
+    await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(attempts, 2);
     assert.equal(retries[0].delayMs, 2_000);
 
+    now = 90_000;
     retries.shift()!.callback();
-    await Promise.resolve();
+    await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(attempts, 3);
-    assert.equal(retries[0].delayMs, 3_000);
+    assert.equal(retries[0].delayMs, 4_000);
 
+    now = 100_000;
     retries.shift()!.callback();
-    await Promise.resolve();
+    await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(attempts, 4);
     assert.equal(
         io.roomEvents.filter((event) => event.event === 'game_over').length,
         1,
     );
+    assert.equal(
+        attemptedRecords.every((record) => record === attemptedRecords[0]),
+        true,
+    );
+    assert.equal(attemptedRecords[0].finishedAtEpochMs, 70_000);
+});
+
+test('persistence retry jitter disperses equal first failures', async () => {
+    const firstDelayFor = async (randomValue: number): Promise<number> => {
+        const io = new FakeIo();
+        const manager = new FakeRoomManager();
+        const delays: number[] = [];
+        createSocketGateway(
+            io,
+            manager,
+            async () => {
+                throw new Error('database unavailable');
+            },
+            (_callback, delayMs) => delays.push(delayMs),
+            () => 70_000,
+            () => undefined,
+            () => randomValue,
+        );
+        const socket = new FakeSocket('socket-a');
+        const room = createRoom();
+        manager.queuedRoom = room;
+        manager.roomBySocket = room;
+        io.sockets.sockets.set('socket-b', new FakeSocket('socket-b'));
+        io.connect(socket);
+        socket.trigger('request_match', {
+            protocolVersion: PROTOCOL_VERSION,
+            playerId: 'player-aaaa',
+        });
+        room.gameState = createState('finished');
+        manager.emit('game_finished', { roomId: room.id, state: room.gameState });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        return delays[0];
+    };
+
+    assert.equal(await firstDelayFor(0), 500);
+    assert.equal(await firstDelayFor(1), 1_500);
+});
+
+test('durable enqueue attempts use a global concurrency bound', async () => {
+    const io = new FakeIo();
+    const manager = new FakeRoomManager();
+    const started: string[] = [];
+    const finish = new Map<string, () => void>();
+    const lifecycle = createSocketGateway(
+        io,
+        manager,
+        (record) => new Promise<'enqueued'>((resolve) => {
+            started.push(record.matchId);
+            finish.set(record.matchId, () => resolve('enqueued'));
+        }),
+    );
+    io.sockets.sockets.set('socket-b', new FakeSocket('socket-b'));
+
+    for (let index = 0; index < 3; index += 1) {
+        const socket = new FakeSocket(`socket-${index}`);
+        const room = createRoom(socket.id);
+        room.id = `match-${index}`;
+        manager.queuedRoom = room;
+        manager.roomBySocket = room;
+        io.connect(socket);
+        socket.trigger('request_match', {
+            protocolVersion: PROTOCOL_VERSION,
+            playerId: `player-${index}aaa`,
+        });
+        room.gameState = createState('finished');
+        manager.emit('game_finished', { roomId: room.id, state: room.gameState });
+    }
+
+    assert.deepEqual(started, ['match-0', 'match-1']);
+    finish.get('match-0')!();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(started, ['match-0', 'match-1', 'match-2']);
+
+    finish.get('match-1')!();
+    finish.get('match-2')!();
+    await lifecycle.shutdown();
+});
+
+test('shutdown final flush keeps the same global concurrency bound', async () => {
+    const io = new FakeIo();
+    const manager = new FakeRoomManager();
+    const completions: Array<() => void> = [];
+    let active = 0;
+    let maximumActive = 0;
+    let attempts = 0;
+    const lifecycle = createSocketGateway(
+        io,
+        manager,
+        () => new Promise<'enqueued'>((resolve) => {
+            attempts += 1;
+            active += 1;
+            maximumActive = Math.max(maximumActive, active);
+            completions.push(() => {
+                active -= 1;
+                resolve('enqueued');
+            });
+        }),
+    );
+    io.sockets.sockets.set('socket-b', new FakeSocket('socket-b'));
+
+    for (let index = 0; index < 4; index += 1) {
+        const socket = new FakeSocket(`shutdown-socket-${index}`);
+        const room = createRoom(socket.id);
+        room.id = `shutdown-match-${index}`;
+        manager.queuedRoom = room;
+        manager.roomBySocket = room;
+        io.connect(socket);
+        socket.trigger('request_match', {
+            protocolVersion: PROTOCOL_VERSION,
+            playerId: `shutdown-player-${index}`,
+        });
+        room.gameState = createState('finished');
+        manager.emit('game_finished', { roomId: room.id, state: room.gameState });
+    }
+
+    assert.equal(active, 2);
+    const shutdown = lifecycle.shutdown();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(maximumActive, 2);
+
+    let completed = 0;
+    while (completed < 4) {
+        while (completed < completions.length) {
+            completions[completed++]();
+        }
+        await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    await shutdown;
+    assert.equal(attempts, 4);
+    assert.equal(active, 0);
+});
+
+test('an invalid resolved enqueue result is retried', async () => {
+    const io = new FakeIo();
+    const manager = new FakeRoomManager();
+    const scheduled: Array<{ callback: () => void; delayMs: number }> = [];
+    createSocketGateway(
+        io,
+        manager,
+        async () => false as never,
+        (callback, delayMs) => {
+            const handle = { callback, delayMs };
+            scheduled.push(handle);
+            return handle;
+        },
+        () => 70_000,
+        () => undefined,
+        () => 0.5,
+    );
+    const socket = new FakeSocket('socket-a');
+    const room = createRoom();
+    manager.queuedRoom = room;
+    manager.roomBySocket = room;
+    io.sockets.sockets.set('socket-b', new FakeSocket('socket-b'));
+    io.connect(socket);
+    socket.trigger('request_match', {
+        protocolVersion: PROTOCOL_VERSION,
+        playerId: 'player-aaaa',
+    });
+    room.gameState = createState('finished');
+
+    manager.emit('game_finished', { roomId: room.id, state: room.gameState });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    assert.equal(scheduled.length, 1);
+    assert.equal(scheduled[0].delayMs, 1_000);
+});
+
+test('gateway shutdown reports a failed final scheduled-record flush', async () => {
+    const io = new FakeIo();
+    const manager = new FakeRoomManager();
+    const scheduled: Array<{ callback: () => void; delayMs: number }> = [];
+    const cancelled: unknown[] = [];
+    let attempts = 0;
+    const lifecycle = createSocketGateway(
+        io,
+        manager,
+        async () => {
+            attempts += 1;
+            throw new Error('database unavailable');
+        },
+        (callback, delayMs) => {
+            const handle = { callback, delayMs };
+            scheduled.push(handle);
+            return handle;
+        },
+        () => 0,
+        (handle) => cancelled.push(handle),
+    );
+    const socket = new FakeSocket('socket-a');
+    const room = createRoom();
+    manager.queuedRoom = room;
+    manager.roomBySocket = room;
+    io.sockets.sockets.set('socket-b', new FakeSocket('socket-b'));
+    io.connect(socket);
+    socket.trigger('request_match', {
+        protocolVersion: PROTOCOL_VERSION,
+        playerId: 'player-aaaa',
+    });
+    room.gameState = createState('finished');
+    manager.emit('game_finished', { roomId: room.id, state: room.gameState });
+    await Promise.resolve();
+
+    await assert.rejects(
+        lifecycle.shutdown(),
+        (error: unknown) => error instanceof Error
+            && error.message === 'match_persistence_final_flush_failed'
+            && !error.message.includes(room.id)
+            && !error.message.includes('player-aaaa'),
+    );
+    assert.equal(attempts, 2);
+    scheduled[0].callback();
+    await Promise.resolve();
+
+    assert.equal(attempts, 2);
+    assert.deepEqual(cancelled, [scheduled[0]]);
+});
+
+test('successful shutdown flush is recovered by a new outbox worker', async () => {
+    const io = new FakeIo();
+    const manager = new FakeRoomManager();
+    const outbox = new InMemoryMatchOutboxRepository();
+    const scheduled: Array<{ callback: () => void; delayMs: number }> = [];
+    let enqueueAttempts = 0;
+    const lifecycle = createSocketGateway(
+        io,
+        manager,
+        async (record) => {
+            enqueueAttempts += 1;
+            if (enqueueAttempts === 1) throw new Error('database unavailable');
+            return outbox.enqueue(record, 0);
+        },
+        (callback, delayMs) => {
+            const handle = { callback, delayMs };
+            scheduled.push(handle);
+            return handle;
+        },
+        () => 0,
+        () => undefined,
+    );
+    const socket = new FakeSocket('socket-a');
+    const room = createRoom();
+    room.gameState = createState('finished');
+    manager.queuedRoom = room;
+    manager.roomBySocket = room;
+    io.sockets.sockets.set('socket-b', new FakeSocket('socket-b'));
+    io.connect(socket);
+    socket.trigger('request_match', {
+        protocolVersion: PROTOCOL_VERSION,
+        playerId: 'player-aaaa',
+    });
+    manager.emit('game_finished', { roomId: room.id, state: room.gameState });
+    await Promise.resolve();
+
+    await lifecycle.shutdown();
+    assert.equal(enqueueAttempts, 2);
+
+    const recovered: string[] = [];
+    const worker = new MatchOutboxWorker({
+        repository: outbox,
+        materialize: async (record) => {
+            recovered.push(record.matchId);
+        },
+        now: () => 0,
+        random: () => 0.5,
+        schedule: () => undefined,
+        cancelSchedule: () => undefined,
+    });
+    await worker.start();
+    for (let attempt = 0; recovered.length === 0 && attempt < 50; attempt += 1) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    await worker.shutdown();
+
+    assert.deepEqual(recovered, [room.id]);
+});
+
+test('gateway shutdown is idempotent and waits for the current persistence attempt', async () => {
+    const io = new FakeIo();
+    const manager = new FakeRoomManager();
+    let finishPersistence: (() => void) | undefined;
+    const lifecycle = createSocketGateway(
+        io,
+        manager,
+        () => new Promise<'enqueued'>((resolve) => {
+            finishPersistence = () => resolve('enqueued');
+        }),
+    );
+    const socket = new FakeSocket('socket-a');
+    const room = createRoom();
+    manager.queuedRoom = room;
+    manager.roomBySocket = room;
+    io.sockets.sockets.set('socket-b', new FakeSocket('socket-b'));
+    io.connect(socket);
+    socket.trigger('request_match', {
+        protocolVersion: PROTOCOL_VERSION,
+        playerId: 'player-aaaa',
+    });
+    room.gameState = createState('finished');
+    manager.emit('game_finished', { roomId: room.id, state: room.gameState });
+    let shutdownFinished = false;
+
+    const firstShutdown = lifecycle.shutdown().then(() => {
+        shutdownFinished = true;
+    });
+    const secondShutdown = lifecycle.shutdown();
+    await Promise.resolve();
+    assert.equal(shutdownFinished, false);
+
+    finishPersistence!();
+    await Promise.all([firstShutdown, secondShutdown]);
+    assert.equal(shutdownFinished, true);
 });
 
 test('completion de-duplication covers every retained finished room', () => {
     const io = new FakeIo();
     const manager = new FakeRoomManager();
-    createSocketGateway(io, manager, () => undefined);
+    createSocketGateway(io, manager, () => 'enqueued');
     const state = createState('finished');
 
     for (let index = 0; index < 1_025; index += 1) {
@@ -629,5 +970,62 @@ test('a terminal committed move uses the same de-duplicated completion path', ()
         io.roomEvents.filter((event) => event.event === 'game_over').length,
         1,
     );
-    assert.deepEqual(persisted, [room]);
+    assert.equal(persisted.length, 1);
+    assert.equal(persisted[0].matchId, room.id);
+    assert.equal(persisted[0].finishedAtEpochMs, 70_000);
+});
+
+test('a repeated terminal command cannot retain and re-persist a finished room', () => {
+    const io = new FakeIo();
+    const manager = new FakeRoomManager();
+    const persisted: FinishedMatchRecord[] = [];
+    let now = 70_000;
+    createSocketGateway(
+        io,
+        manager,
+        (record) => {
+            persisted.push(record);
+            return 'enqueued';
+        },
+        () => undefined,
+        () => now,
+    );
+    const socket = new FakeSocket('socket-a');
+    const room = createRoom();
+    room.gameState = createState('finished');
+    manager.roomBySocket = room;
+    manager.moveDecision = {
+        type: 'committed',
+        protocolVersion: PROTOCOL_VERSION,
+        commandId: 'command-1',
+        state: room.gameState,
+        capturedPieces: [],
+        turnDeadlineEpochMs: room.turnDeadlineEpochMs,
+    };
+    manager.queuedRoom = room;
+    io.sockets.sockets.set('socket-b', new FakeSocket('socket-b'));
+    io.connect(socket);
+    socket.trigger('request_match', {
+        protocolVersion: PROTOCOL_VERSION,
+        playerId: 'player-aaaa',
+    });
+    const intent = {
+        protocolVersion: PROTOCOL_VERSION,
+        matchId: room.id,
+        commandId: 'command-1',
+        expectedRevision: 0,
+        from: { x: 0, y: 0 },
+        to: { x: 0, y: 1 },
+    };
+
+    socket.trigger('submit_move', intent);
+    socket.trigger('submit_move', intent);
+    now += 5 * 60_000 + 1;
+    manager.emit('game_finished', { roomId: room.id, state: room.gameState });
+
+    assert.equal(persisted.length, 1);
+    assert.equal(
+        io.roomEvents.filter((event) => event.event === 'game_over').length,
+        2,
+    );
 });

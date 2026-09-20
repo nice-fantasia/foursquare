@@ -531,3 +531,42 @@ test('disconnecting after game over does not start a reconnect timer', () => {
     assert.equal(manager.removePlayer(black.socketId), undefined);
     assert.equal(scheduled.length, scheduledBeforeDisconnect);
 });
+
+test('disposing a room manager cancels timers and releases retained state', () => {
+    const scheduled: Array<{ callback: () => void; delayMs: number }> = [];
+    const cancelled: unknown[] = [];
+    const manager = new RoomManager({
+        random: () => 0,
+        id: () => 'match-disposed',
+        schedule: (callback, delayMs) => {
+            const handle = { callback, delayMs };
+            scheduled.push(handle);
+            return handle;
+        },
+        cancelSchedule: (handle) => cancelled.push(handle),
+    });
+    const first: Player = {
+        id: 'dispose-first',
+        socketId: 'dispose-socket-first',
+        name: 'First',
+    };
+    const second: Player = {
+        id: 'dispose-second',
+        socketId: 'dispose-socket-second',
+        name: 'Second',
+    };
+    manager.queuePlayer(first);
+    manager.queuePlayer(second);
+    manager.removePlayer(first.socketId);
+
+    manager.dispose();
+    manager.dispose();
+
+    assert.equal(scheduled.length, 2);
+    assert.equal(cancelled.length, 2);
+    assert.equal(manager.getRoomBySocketId(second.socketId), undefined);
+    assert.equal(
+        manager.removePlayerFromQueue(first.id, first.socketId),
+        false,
+    );
+});

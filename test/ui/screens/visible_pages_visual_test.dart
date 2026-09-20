@@ -47,6 +47,57 @@ void main() {
     }
   });
 
+  testWidgets('onboarding 横屏为可滚动内容显示常驻滚动提示', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(800, 360);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        locale: const Locale('zh'),
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        theme: modernEasternThemePack.themeData,
+        home: const OnboardingPage(),
+      ),
+    );
+    await tester.pump();
+
+    final pageScrollView = find
+        .descendant(
+          of: find.byType(PageView),
+          matching: find.byType(SingleChildScrollView),
+        )
+        .first;
+    final pageScrollable = find
+        .descendant(
+          of: pageScrollView,
+          matching: find.byType(Scrollable),
+        )
+        .first;
+    final scrollPosition =
+        tester.state<ScrollableState>(pageScrollable).position;
+
+    expect(scrollPosition.maxScrollExtent, greaterThan(0));
+    final scrollbarFinder = find.descendant(
+      of: find.byType(PageView),
+      matching: find.byType(Scrollbar),
+    );
+    expect(scrollbarFinder, findsWidgets);
+    expect(
+      tester.widget<Scrollbar>(scrollbarFinder.first).thumbVisibility,
+      isTrue,
+    );
+
+    await tester.drag(pageScrollView, const Offset(0, -240));
+    await tester.pumpAndSettle();
+    expect(scrollPosition.pixels, greaterThan(0));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('LAN 创建页在窄屏可滚动且主操作至少 48px', (WidgetTester tester) async {
     tester.view.physicalSize = const Size(320, 568);
     tester.view.devicePixelRatio = 1;

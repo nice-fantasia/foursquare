@@ -9,6 +9,7 @@ import 'package:foursquare/bloc/game_event.dart';
 import 'package:foursquare/bloc/game_state.dart';
 import 'package:foursquare/l10n/app_localizations.dart';
 import 'package:foursquare/models/board_state.dart';
+import 'package:foursquare/models/game_result.dart';
 import 'package:foursquare/models/piece_type.dart';
 import 'package:foursquare/services/voice/game_voice_session.dart';
 import 'package:foursquare/ui/screens/game_page.dart';
@@ -204,6 +205,78 @@ void main() {
     expect(factoryCalls, 0);
   });
 
+  testWidgets('authoritative terminal state keeps active audio available', (
+    tester,
+  ) async {
+    _usePortraitViewport(tester);
+    GameState currentState = _playing();
+    final states = StreamController<GameState>();
+    final session = _FakeGameVoiceSession();
+    when(() => bloc.state).thenAnswer((_) => currentState);
+    whenListen(bloc, states.stream, initialState: currentState);
+
+    await tester.pumpWidget(
+      _app(
+        bloc: bloc,
+        child: GamePageView(
+          voiceSessionFactory: ({required bloc, required controlledPlayer}) =>
+              session,
+        ),
+      ),
+    );
+    await tester.ensureVisible(find.byKey(const Key('game-voice-enable')));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.byKey(const Key('game-voice-enable')));
+    await tester.pump();
+
+    currentState = GameOver.fromPlaying(
+      _playing(),
+      GameResult.blackWin(
+        reason: 'test',
+        moveCount: 1,
+        duration: const Duration(seconds: 1),
+      ),
+    );
+    states.add(currentState);
+    await tester.pump();
+
+    expect(session.availability, [true]);
+    await states.close();
+  });
+
+  testWidgets('failed result speech exposes replay without another listen', (
+    tester,
+  ) async {
+    _usePortraitViewport(tester);
+    final state = _playing();
+    final session = _FakeGameVoiceSession();
+    _stubState(bloc, state);
+
+    await tester.pumpWidget(
+      _app(
+        bloc: bloc,
+        child: GamePageView(
+          voiceSessionFactory: ({required bloc, required controlledPlayer}) =>
+              session,
+        ),
+      ),
+    );
+    await tester.ensureVisible(find.byKey(const Key('game-voice-enable')));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.byKey(const Key('game-voice-enable')));
+    await tester.pump();
+
+    session.emitAwaitingReplay();
+    await tester.pump();
+    final replay = find.byKey(const Key('game-voice-replay'));
+    expect(replay, findsOneWidget);
+    await tester.tap(replay);
+    await tester.pump();
+
+    expect(session.replayCalls, 1);
+    expect(session.listenCalls, 0);
+  });
+
   testWidgets('lifecycle updates voice availability and keeps clock events',
       (tester) async {
     _usePortraitViewport(tester);
@@ -342,6 +415,7 @@ final class _FakeGameVoiceSession implements GameVoiceSession {
       const VoiceInteractionState(VoiceInteractionPhase.disabled);
   int enableCalls = 0;
   int listenCalls = 0;
+  int replayCalls = 0;
   int disposeCalls = 0;
   final List<bool> availability = [];
 
@@ -372,6 +446,11 @@ final class _FakeGameVoiceSession implements GameVoiceSession {
   }
 
   @override
+  Future<void> replayPendingReply() async {
+    replayCalls += 1;
+  }
+
+  @override
   Future<void> updateAvailability({required bool appIsActive}) async {
     availability.add(appIsActive);
   }
@@ -379,5 +458,13 @@ final class _FakeGameVoiceSession implements GameVoiceSession {
   void _emit(VoiceInteractionState state) {
     _state = state;
     _states.add(state);
+  }
+
+  void emitAwaitingReplay() {
+    _emit(
+      const VoiceInteractionState(
+        VoiceInteractionPhase.awaitingReplay,
+      ),
+    );
   }
 }

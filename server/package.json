@@ -8,12 +8,18 @@
         "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
         "prisma:generate": "prisma generate",
         "db:migrate:deploy": "prisma migrate deploy",
-        "build": "npm run prisma:generate && tsc",
-        "test": "npm run build && node --test dist/game/rules.test.js dist/game/room_manager.test.js dist/gateway/socket.test.js dist/gateway/socket.integration.test.js dist/services/database.test.js"
+        "clean:dist": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+        "build": "npm run build:production",
+        "build:production": "npm run prisma:generate && npm run clean:dist && tsc -p tsconfig.production.json",
+        "build:test": "npm run prisma:generate && npm run clean:dist && tsc",
+        "test": "npm run build:test && node --test dist/config.test.js dist/game/rules.test.js dist/game/room_manager.test.js dist/gateway/socket.test.js dist/gateway/socket.integration.test.js dist/http/app.test.js dist/ops/production_artifacts.test.js dist/persistence/finished_match_record.test.js dist/persistence/match_outbox.test.js dist/persistence/match_outbox_schema.test.js dist/persistence/match_outbox_worker.test.js dist/runtime/server_runtime.test.js dist/security/client_ip.test.js dist/security/rate_limiter.test.js dist/security/socket_security.integration.test.js dist/services/database.test.js"
     },
     "keywords": [],
     "author": "",
     "license": "ISC",
+    "engines": {
+        "node": ">=22 <23 || >=24 <25"
+    },
     "dependencies": {
         "@prisma/client": "^6.19.3",
         "cors": "^2.8.5",

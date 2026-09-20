@@ -1,0 +1,59 @@
+services:
+  migrate:
+    build:
+      context: .
+      target: migration
+    restart: "no"
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+  server:
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    init: true
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS is required}
+      TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:?TRUSTED_PROXY_HOPS is required}
+      HTTP_BODY_LIMIT_BYTES: ${HTTP_BODY_LIMIT_BYTES:-16384}
+      SOCKET_MAX_PAYLOAD_BYTES: ${SOCKET_MAX_PAYLOAD_BYTES:-16384}
+      HTTP_RATE_LIMIT_WINDOW_MS: ${HTTP_RATE_LIMIT_WINDOW_MS:-60000}
+      HTTP_RATE_LIMIT_MAX: ${HTTP_RATE_LIMIT_MAX:-120}
+      SOCKET_CONNECTION_RATE_LIMIT_WINDOW_MS: ${SOCKET_CONNECTION_RATE_LIMIT_WINDOW_MS:-60000}
+      SOCKET_CONNECTION_RATE_LIMIT_MAX: ${SOCKET_CONNECTION_RATE_LIMIT_MAX:-30}
+      SOCKET_EVENT_RATE_LIMIT_WINDOW_MS: ${SOCKET_EVENT_RATE_LIMIT_WINDOW_MS:-10000}
+      SOCKET_EVENT_RATE_LIMIT_MAX: ${SOCKET_EVENT_RATE_LIMIT_MAX:-120}
+      RATE_LIMIT_MAX_KEYS: ${RATE_LIMIT_MAX_KEYS:-10000}
+      READINESS_TIMEOUT_MS: ${READINESS_TIMEOUT_MS:-2000}
+      SHUTDOWN_TIMEOUT_MS: ${SHUTDOWN_TIMEOUT_MS:-10000}
+    expose:
+      - "3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3000/health/ready').then((response)=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    stop_grace_period: 15s

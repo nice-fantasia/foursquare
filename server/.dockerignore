@@ -1,8 +1,12 @@
-.env*
-node_modules/
-dist/
-coverage/
+.env
+.env.*
+.git
+.gitignore
+node_modules
+dist
+coverage
 *.log
 *.zip
 *.sqlite
 *.sqlite-journal
+src/**/*.test.ts

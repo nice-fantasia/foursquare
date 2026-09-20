@@ -259,6 +259,37 @@ final class VoiceInteractionController {
     return _speakPendingReply(reply, generation);
   }
 
+  /// Drops an authorized reply that belongs to a superseded game/session.
+  Future<bool> discardPendingReply() async {
+    if (_disposed ||
+        (_state.phase != VoiceInteractionPhase.awaitingReplay &&
+            _state.phase != VoiceInteractionPhase.speaking) ||
+        _pendingReply == null) {
+      return false;
+    }
+    final wasSpeaking = _state.phase == VoiceInteractionPhase.speaking;
+    _pendingReply = null;
+    final generation = ++_generation;
+    if (!wasSpeaking) {
+      _emit(const VoiceInteractionState(VoiceInteractionPhase.ready));
+      return true;
+    }
+
+    _emit(const VoiceInteractionState(VoiceInteractionPhase.interrupted));
+    final stopped = await _portOperationSucceeded(_synthesis.stop());
+    if (_isCurrent(generation)) {
+      _emit(
+        stopped
+            ? const VoiceInteractionState(VoiceInteractionPhase.ready)
+            : const VoiceInteractionState(
+                VoiceInteractionPhase.failed,
+                failure: VoicePortFailure.interrupted,
+              ),
+      );
+    }
+    return stopped;
+  }
+
   Future<void> interrupt() async {
     if (_disposed) {
       return;

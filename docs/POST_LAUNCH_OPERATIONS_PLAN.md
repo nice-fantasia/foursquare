@@ -351,10 +351,10 @@ Android vitals 的核心质量指标会影响 Google Play 可见性，应持续�
 
 - 服务端已实现权威规则、匹配、幂等落子、超时、断线恢复和数据库写入。
 - 房间和部分恢复状态仍保存在单个 Node.js 进程内存中。
-- 数据库写入失败时使用进程内退避重试；进程退出可能丢失尚未落库的完成对局。
+- 完成对局先写入 PostgreSQL 同库 outbox，再由有界并发、指数抖动和租约恢复 worker 幂等写入正式对局表；成功 enqueue 后可在进程重启后恢复。数据库持续不可用且记录从未进入 outbox 时仍可能丢失，关机会明确失败。
 - 当前 `docker-compose.yml` 使用开发热重载、示例密码和公开数据库/Redis 端口，只适合本地开发。
-- 当前 Dockerfile 使用已经 EOL 的 Node.js 18；生产镜像须升级到受支持的 LTS。Node.js 官方建议生产环境使用 Active LTS 或 Maintenance LTS。[Node.js 发布周期](https://nodejs.org/en/about/previous-releases)
-- 当前没有生产 TLS、CORS 白名单、网络级限流、健康检查、优雅停机、持久化 outbox、生产监控或经过验证的水平扩容。
+- 独立生产 Compose 与多阶段 Dockerfile 已使用 Node.js 24 主版本、锁定 npm 依赖、非 root 运行、只读文件系统、健康检查和一次性 migration job；基础镜像具体 patch/Alpine 版本及多架构 digest 仍需在发布候选时从官方 registry 核验后固定。Node.js 官方建议生产环境使用 Active LTS 或 Maintenance LTS。[Node.js 发布周期](https://nodejs.org/en/about/previous-releases)
+- 当前本地代码已提供 CORS 白名单、可信代理跳数、HTTP/Socket 限流、健康检查、总时限优雅停机和持久化 outbox。生产 TLS、网络级限流与防护、真实数据库演练、监控告警和经过验证的水平扩容仍未完成。
 
 因此，第一版在线生产服务保持单个应用实例，先完成可恢复性和容量基线，再进入多实例。
 
@@ -373,7 +373,7 @@ Android vitals 的核心质量指标会影响 Google Play 可见性，应持续�
 - PostgreSQL 与 Redis 只在私网访问；预算允许时使用托管数据库和托管 Redis。
 - 使用反向代理或负载入口提供 HTTPS/WSS、连接超时和基础 DDoS 防护。
 - 建立数据库备份、恢复演练、磁盘监控、账单告警和一键回滚。
-- 完成持久化 outbox/恢复 worker 后再把对局落库可靠性标记为生产可用。
+- 在真实 PostgreSQL 完成 migration/回滚、双 worker 竞争、慢租约、进程重启和数据库故障注入后，再把当前 outbox/恢复 worker 标记为生产可用。
 
 #### L2：纵向扩容与服务拆分
 

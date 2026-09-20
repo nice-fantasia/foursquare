@@ -1,32 +1,35 @@
-import express from 'express';
-import http from 'http';
-import { Server } from 'socket.io';
-import cors from 'cors';
-import dotenv from 'dotenv';
-import { initGameServer } from './gateway/socket';
+import 'dotenv/config';
 
-dotenv.config();
+import { ConfigurationError, loadServerConfig } from './config';
+import { createServerRuntime } from './runtime/server_runtime';
+import { createDatabaseService } from './services/database';
 
-const app = express();
-const server = http.createServer(app);
-const io = new Server(server, {
-    cors: {
-        origin: "*",
-        methods: ["GET", "POST"]
-    }
-});
+const main = async (): Promise<void> => {
+    const config = loadServerConfig();
+    const database = createDatabaseService(config.databaseUrl);
+    const runtime = createServerRuntime(config, {
+        database,
+        outboxRepository: database,
+    });
+    const address = await runtime.start();
 
-app.use(cors());
-app.use(express.json());
+    console.log(`Server is running on port ${address.port}`);
 
-app.get('/', (req, res) => {
-    res.send('Welcome to Foursquare Server');
-});
+    const shutdown = (): void => {
+        void runtime.shutdown().catch(() => {
+            console.error('Server shutdown failed');
+            process.exitCode = 1;
+        });
+    };
+    process.once('SIGTERM', shutdown);
+    process.once('SIGINT', shutdown);
+};
 
-const PORT = process.env.PORT || 3000;
-
-initGameServer(io);
-
-server.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
+void main().catch((error: unknown) => {
+    console.error(
+        error instanceof ConfigurationError
+            ? error.message
+            : 'Server startup failed',
+    );
+    process.exitCode = 1;
 });

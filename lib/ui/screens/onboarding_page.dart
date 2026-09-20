@@ -135,19 +135,38 @@ class _OnboardingPageState extends State<OnboardingPage> {
   }
 }
 
-class _ScrollableOnboardingPage extends StatelessWidget {
+class _ScrollableOnboardingPage extends StatefulWidget {
   const _ScrollableOnboardingPage({required this.child});
 
   final Widget child;
 
   @override
+  State<_ScrollableOnboardingPage> createState() =>
+      _ScrollableOnboardingPageState();
+}
+
+class _ScrollableOnboardingPageState extends State<_ScrollableOnboardingPage> {
+  final ScrollController _scrollController = ScrollController();
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
-      builder: (context, constraints) => SingleChildScrollView(
-        physics: const ClampingScrollPhysics(),
-        child: ConstrainedBox(
-          constraints: BoxConstraints(minHeight: constraints.maxHeight),
-          child: child,
+      builder: (context, constraints) => Scrollbar(
+        controller: _scrollController,
+        thumbVisibility: true,
+        child: SingleChildScrollView(
+          controller: _scrollController,
+          physics: const ClampingScrollPhysics(),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minHeight: constraints.maxHeight),
+            child: widget.child,
+          ),
         ),
       ),
     );

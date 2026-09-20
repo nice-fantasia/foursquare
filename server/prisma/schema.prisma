@@ -18,17 +18,38 @@ model User {
 model Match {
   id              String    @id @default(uuid())
   externalId      String    @unique
+  contentHash     String
   protocolVersion Int       @default(1)
   player1Id       String
   player2Id       String
   player1         User      @relation("Player1", fields: [player1Id], references: [id])
   player2         User      @relation("Player2", fields: [player2Id], references: [id])
+  player1Color    String
+  player2Color    String
   winnerId        String?
+  winnerColor     String
   startingPlayer  String
   endReason       String
   revision        Int
   status          String    @default("finished") // playing, finished
   movesJson       String    @default("[]") // Store moves as JSON string for now
   createdAt       DateTime  @default(now())
+  startedAt       DateTime
   finishedAt      DateTime?
+}
+
+model MatchOutbox {
+  id             String    @id @default(uuid())
+  matchId        String    @unique
+  contentHash    String
+  payloadJson    String
+  attemptCount   Int       @default(0)
+  availableAt    DateTime  @default(now())
+  leaseToken     String?
+  leaseExpiresAt DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([availableAt, createdAt])
+  @@index([leaseExpiresAt])
 }
