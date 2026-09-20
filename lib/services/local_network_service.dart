@@ -7,6 +7,8 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../models/websocket_message.dart';
 import '../services/logger_service.dart';
 
+String formatLanServerStartedLog(int port) => 'Server running on port $port';
+
 enum LocalNetworkRole { host, client, none }
 
 /// Resolves an NSD service without relying on protected Wi-Fi metadata.
@@ -92,7 +94,7 @@ class LocalNetworkService {
 
       _server = await shelf_io.serve(handler, InternetAddress.anyIPv4, _port);
       logger.info(
-        'Server running on port $_server.port',
+        formatLanServerStartedLog(_server!.port),
         'LocalNetworkService',
       );
       _updateConnectionState(LocalNetworkConnectionState.hosting);
