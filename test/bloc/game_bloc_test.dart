@@ -96,6 +96,9 @@ void main() {
 
       // 设置默认的mock行为
       when(() => audioCoordinator.initialize()).thenAnswer((_) async {});
+      when(() => audioCoordinator.stopAll()).thenAnswer((_) async {});
+      when(() => audioCoordinator.pauseAll()).thenAnswer((_) async {});
+      when(() => audioCoordinator.resumeAll()).thenAnswer((_) async {});
       when(() => audioCoordinator.onGameEvent(any(), data: any(named: 'data')))
           .thenReturn(null);
       when(() => audioCoordinator.onSceneChange(any()))
@@ -120,6 +123,24 @@ void main() {
           difficulty: any(named: 'difficulty'),
         ),
       ).thenAnswer((_) async => true);
+    });
+
+    test('closing the game stops audio even before setup completes', () async {
+      final bloc = GameBloc(audioCoordinator: audioCoordinator);
+      await bloc.close();
+      verify(() => audioCoordinator.stopAll()).called(1);
+    });
+
+    test('lifecycle audio pauses and resumes even outside a playing clock',
+        () async {
+      final bloc = GameBloc(audioCoordinator: audioCoordinator);
+      bloc.add(PauseTurnClockEvent(DateTime(2026)));
+      await Future<void>.delayed(Duration.zero);
+      verify(() => audioCoordinator.pauseAll()).called(1);
+      bloc.add(ResumeTurnClockEvent(DateTime(2026)));
+      await Future<void>.delayed(Duration.zero);
+      verify(() => audioCoordinator.resumeAll()).called(1);
+      await bloc.close();
     });
 
     test('初始状态应该是 GameInitial', () {

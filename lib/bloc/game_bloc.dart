@@ -670,6 +670,13 @@ class GameBloc extends Bloc<GameEvent, GameState> {
           ),
         ),
       );
+      unawaited(
+        _audioCoordinator.onSceneChange(
+          mode == GameMode.pve
+              ? audio.GameScene.aiGame
+              : audio.GameScene.gameplay,
+        ),
+      );
       emit(restoredPlaying);
       _startTurnTicker();
 
@@ -770,6 +777,7 @@ class GameBloc extends Bloc<GameEvent, GameState> {
     PauseTurnClockEvent event,
     Emitter<GameState> emit,
   ) async {
+    unawaited(_audioCoordinator.pauseAll());
     if (state is! GamePlaying) return;
     final playing = state as GamePlaying;
     final clock = playing.turnClock;
@@ -790,6 +798,7 @@ class GameBloc extends Bloc<GameEvent, GameState> {
     ResumeTurnClockEvent event,
     Emitter<GameState> emit,
   ) async {
+    unawaited(_audioCoordinator.resumeAll());
     if (state is! GamePlaying) return;
     final playing = state as GamePlaying;
     final clock = playing.turnClock;
@@ -869,11 +878,13 @@ class GameBloc extends Bloc<GameEvent, GameState> {
   }
 
   @override
-  Future<void> close() {
+  Future<void> close() async {
     _gameStartGeneration++;
     _aiGeneration++;
     _turnTicker?.cancel();
-    return super.close();
+    final stopped = _audioCoordinator.stopAll();
+    await super.close();
+    await stopped;
   }
 
   bool _isCurrentGameStart(int request, Emitter<GameState> emit) =>

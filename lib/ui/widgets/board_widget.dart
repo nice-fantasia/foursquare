@@ -24,7 +24,7 @@ class BoardWidget extends StatelessWidget {
   final double? size;
   final ThemePack? themePack;
 
-  /// 是否翻转棋盘视角（让白方在下方）
+  /// 是否翻转棋盘视角（初始黑方在上，翻转后黑方在下）。
   final bool flipBoard;
 
   const BoardWidget({

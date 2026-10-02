@@ -7,6 +7,7 @@
 /// - 循环播放控制
 library;
 
+import 'dart:async';
 import 'package:audioplayers/audioplayers.dart';
 import 'logger_service.dart';
 
@@ -37,7 +38,17 @@ enum MusicTheme {
 class MusicService {
   static final MusicService _instance = MusicService._internal();
   factory MusicService() => _instance;
-  MusicService._internal();
+  MusicService._internal() : _playerFactory = AudioPlayer.new;
+
+  MusicService.forTesting({required AudioPlayer Function() playerFactory})
+      : _playerFactory = playerFactory;
+
+  final AudioPlayer Function() _playerFactory;
+  Future<void>? _initialization;
+  Future<void> _operation = Future<void>.value();
+  int _generation = 0;
+  StreamSubscription<void>? _completeSubscription;
+  StreamSubscription<PlayerState>? _stateSubscription;
 
   AudioPlayer? _player;
 
@@ -57,20 +68,22 @@ class MusicService {
   };
 
   /// 初始化音乐服务
-  Future<void> initialize() async {
-    final player = _player ??= AudioPlayer();
+  Future<void> initialize() => _initialization ??= _initialize();
+
+  Future<void> _initialize() async {
+    final player = _player ??= _playerFactory();
     await player.setVolume(_volume);
 
     // 设置循环播放
     await player.setReleaseMode(ReleaseMode.loop);
 
     // 监听播放完成事件
-    player.onPlayerComplete.listen((_) {
+    _completeSubscription = player.onPlayerComplete.listen((_) {
       _isPlaying = false;
     });
 
     // 监听播放状态变化
-    player.onPlayerStateChanged.listen((state) {
+    _stateSubscription = player.onPlayerStateChanged.listen((state) {
       _isPlaying = state == PlayerState.playing;
     });
   }
@@ -86,48 +99,66 @@ class MusicService {
 
     final musicFile = _musicFiles[theme];
     if (musicFile == null) return;
+    final generation = ++_generation;
+    _currentTheme = theme;
     final player = _player;
     if (player == null) {
-      _currentTheme = theme;
       return;
     }
 
-    try {
+    await _enqueue(() async {
+      if (!_enabled || generation != _generation) return;
       // 停止当前播放
       await player.stop();
+      if (!_enabled || generation != _generation) return;
 
       // 设置新的音乐源
       await player.setSource(AssetSource(musicFile));
+      if (!_enabled || generation != _generation) return;
 
       // 开始播放
       await player.resume();
 
-      _currentTheme = theme;
-      _isPlaying = true;
-    } catch (e) {
-      logger.error('播放音乐失败: $musicFile', 'MusicService', e);
+      if (generation == _generation) _isPlaying = true;
+    });
+  }
+
+  Future<void> _enqueue(Future<void> Function() action) {
+    _operation = _operation.then((_) => action()).catchError((Object error) {
+      logger.error('音乐操作失败', 'MusicService', error);
       _isPlaying = false;
-    }
+    });
+    return _operation;
   }
 
   /// 停止音乐
   Future<void> stopMusic() async {
-    await _player?.stop();
+    _generation++;
     _isPlaying = false;
     _currentTheme = null;
+    await _enqueue(() async {
+      await _player?.stop();
+    });
   }
 
   /// 暂停音乐
   Future<void> pauseMusic() async {
-    await _player?.pause();
+    _generation++;
     _isPlaying = false;
+    await _enqueue(() async {
+      await _player?.pause();
+    });
   }
 
   /// 恢复音乐
   Future<void> resumeMusic() async {
-    if (_enabled && !_isPlaying && _player != null) {
-      await _player!.resume();
-      _isPlaying = true;
+    if (_enabled && !_isPlaying && _player != null && _currentTheme != null) {
+      final generation = ++_generation;
+      await _enqueue(() async {
+        if (!_enabled || generation != _generation) return;
+        await _player!.resume();
+        if (generation == _generation) _isPlaying = true;
+      });
     }
   }
 
@@ -138,11 +169,12 @@ class MusicService {
 
   /// 设置音乐开关
   Future<void> setEnabled(bool enabled) async {
+    final wasEnabled = _enabled;
     _enabled = enabled;
 
-    if (!enabled && _isPlaying) {
+    if (!enabled) {
       await pauseMusic();
-    } else if (enabled && _currentTheme != null) {
+    } else if (!wasEnabled && _currentTheme != null) {
       await playMusic(_currentTheme!);
     }
   }
@@ -217,7 +249,12 @@ class MusicService {
 
   /// 释放资源
   Future<void> dispose() async {
+    await stopMusic();
+    await _initialization;
+    await _completeSubscription?.cancel();
+    await _stateSubscription?.cancel();
     await _player?.dispose();
     _player = null;
+    _initialization = null;
   }
 }

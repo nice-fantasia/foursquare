@@ -11,6 +11,7 @@ import 'package:foursquare/l10n/app_localizations.dart';
 import 'package:foursquare/models/board_state.dart';
 import 'package:foursquare/models/game_result.dart';
 import 'package:foursquare/models/piece_type.dart';
+import 'package:foursquare/models/position.dart';
 import 'package:foursquare/services/voice/game_voice_session.dart';
 import 'package:foursquare/ui/screens/game_page.dart';
 import 'package:mocktail/mocktail.dart';
@@ -29,6 +30,49 @@ void main() {
     bloc = _MockGameBloc();
     when(() => bloc.add(any())).thenReturn(null);
   });
+
+  for (final human in [PieceType.black, PieceType.white]) {
+    for (final starter in [PieceType.black, PieceType.white]) {
+      testWidgets('PVE $human stays below with $starter starting',
+          (tester) async {
+        _usePortraitViewport(tester);
+        final semantics = tester.ensureSemantics();
+        _stubState(
+          bloc,
+          GamePlaying(
+            boardState: BoardState.initial(currentPlayer: starter),
+            mode: GameMode.pve,
+            humanPlayer: human,
+            firstPlayer: starter,
+          ),
+        );
+        await tester.pumpWidget(_app(bloc: bloc, child: const GamePageView()));
+        await tester.pump();
+        final label = human == PieceType.black
+            ? 'Row 4, column 4, Ink'
+            : 'Row 4, column 1, Jade';
+        final ownCell = find.bySemanticsLabel(RegExp('^$label'));
+        expect(ownCell, findsOneWidget);
+        final topCell = find.bySemanticsLabel(RegExp('^Row 1, column 1,'));
+        expect(
+          tester.getCenter(ownCell).dy,
+          greaterThan(tester.getCenter(topCell).dy),
+        );
+        await tester.tap(ownCell);
+        verify(
+          () => bloc.add(
+            ActivateBoardPositionEvent(
+              human == PieceType.black
+                  ? const Position(0, 0)
+                  : const Position(0, 3),
+            ),
+          ),
+        ).called(1);
+        await tester.pumpWidget(const SizedBox());
+        semantics.dispose();
+      });
+    }
+  }
 
   test('production voice constructor is side-effect free', () {
     expect(

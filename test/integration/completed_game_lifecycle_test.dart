@@ -98,6 +98,9 @@ void main() {
     );
     sound = _Audio();
     when(() => sound.initialize()).thenAnswer((_) async {});
+    when(() => sound.stopAll()).thenAnswer((_) async {});
+    when(() => sound.pauseAll()).thenAnswer((_) async {});
+    when(() => sound.resumeAll()).thenAnswer((_) async {});
     when(() => sound.onSceneChange(any())).thenAnswer((_) async {});
     when(() => sound.onGameEvent(any(), data: any(named: 'data')))
         .thenReturn(null);
@@ -493,6 +496,28 @@ void main() {
     expect(bloc.state.boardState, BoardState.initial());
   });
 
+  testWidgets('removing the owned game page closes its audio session',
+      (tester) async {
+    final bloc = (await tester.runAsync(
+      () async => GameBloc(
+        storageService: storage,
+        audioCoordinator: sound,
+      ),
+    ))!;
+    await tester.pumpWidget(
+      MaterialApp(
+        locale: const Locale('en'),
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: BlocProvider(create: (_) => bloc, child: const GamePageView()),
+      ),
+    );
+    await tester.pumpWidget(const SizedBox());
+    await tester.runAsync(() async => Future<void>.delayed(Duration.zero));
+    expect(bloc.isClosed, isTrue);
+    verify(() => sound.stopAll()).called(1);
+  });
+
   testWidgets('continued game renders last move markers through the real page',
       (tester) async {
     final semantics = tester.ensureSemantics();
@@ -518,6 +543,7 @@ void main() {
         );
         await original.close();
       });
+      clearInteractions(sound);
       final restored = (await tester.runAsync(() async {
         final bloc = GameBloc(storageService: storage, audioCoordinator: sound);
         final loaded = bloc.stream.firstWhere((state) => state is GamePlaying);
@@ -525,6 +551,7 @@ void main() {
         await loaded.timeout(const Duration(seconds: 5));
         return bloc;
       }))!;
+      verify(() => sound.onSceneChange(audio.GameScene.gameplay)).called(1);
       addTearDown(restored.close);
       await tester.pumpWidget(
         MaterialApp(

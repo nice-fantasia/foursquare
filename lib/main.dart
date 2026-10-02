@@ -57,7 +57,8 @@ class FourSquareGameApp extends StatefulWidget {
   State<FourSquareGameApp> createState() => _FourSquareGameAppState();
 }
 
-class _FourSquareGameAppState extends State<FourSquareGameApp> {
+class _FourSquareGameAppState extends State<FourSquareGameApp>
+    with WidgetsBindingObserver {
   final StorageService _storageService = StorageService();
   final ThemePackRegistry _themeRegistry = ThemePackRegistry.phaseOne();
   final AppLocaleController _localeController = AppLocaleController();
@@ -68,7 +69,17 @@ class _FourSquareGameAppState extends State<FourSquareGameApp> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _initialize();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      AudioCoordinator().resumeAll();
+    } else {
+      AudioCoordinator().pauseAll();
+    }
   }
 
   Future<void> _initialize() async {
@@ -91,6 +102,7 @@ class _FourSquareGameAppState extends State<FourSquareGameApp> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _localeController.dispose();
     super.dispose();
   }
