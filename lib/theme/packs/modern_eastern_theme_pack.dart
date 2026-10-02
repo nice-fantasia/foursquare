@@ -82,8 +82,8 @@ final ThemePack modernEasternThemePack = ThemePack(
   ),
   motion: const MotionThemeTokens(
     pageTransitionDuration: Duration(milliseconds: 200),
-    moveDuration: Duration(milliseconds: 180),
-    captureDuration: Duration(milliseconds: 240),
+    moveDuration: Duration(milliseconds: 320),
+    captureDuration: Duration(milliseconds: 680),
     stateChangeDuration: Duration(milliseconds: 150),
     firstPlayerDuration: Duration(milliseconds: 420),
     pageCurve: Curves.easeOutCubic,

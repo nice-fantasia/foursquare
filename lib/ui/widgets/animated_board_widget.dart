@@ -33,6 +33,12 @@ class AnimatedBoardWidget extends StatefulWidget {
   final bool particleEnabled;
   final bool flipBoard;
   final BoardTheme? theme; // 棋盘主题
+  final bool feedbackEnabled;
+  final Duration moveDuration;
+  final Duration captureDuration;
+  final Curve moveCurve;
+  final Curve captureCurve;
+  final VoidCallback? onMoveCompleted;
 
   const AnimatedBoardWidget({
     super.key,
@@ -49,6 +55,12 @@ class AnimatedBoardWidget extends StatefulWidget {
     this.particleEnabled = true,
     this.flipBoard = false,
     this.theme,
+    this.feedbackEnabled = true,
+    this.moveDuration = const Duration(milliseconds: 300),
+    this.captureDuration = const Duration(milliseconds: 400),
+    this.moveCurve = Curves.easeOutCubic,
+    this.captureCurve = Curves.easeInOutCubic,
+    this.onMoveCompleted,
   });
 
   @override
@@ -62,6 +74,7 @@ class _AnimatedBoardWidgetState extends State<AnimatedBoardWidget>
   Animation<Offset>? _moveAnimation;
   Position? _animatingTo;
   PieceType? _animatingPiece;
+  int _moveGeneration = 0;
 
   // 吃子动画控制器
   AnimationController? _captureAnimationController;
@@ -91,26 +104,33 @@ class _AnimatedBoardWidgetState extends State<AnimatedBoardWidget>
   void _initAnimations() {
     // 移动动画：300ms，使用easeOutBack曲线实现微弹效果
     _moveAnimationController = AnimationController(
-      duration: const Duration(milliseconds: 300),
+      duration: widget.moveDuration,
       vsync: this,
     );
 
     // 吃子动画：400ms，加入旋转效果
     _captureAnimationController = AnimationController(
-      duration: const Duration(milliseconds: 400),
+      duration: widget.captureDuration,
       vsync: this,
     );
 
+    _moveAnimationController!.addStatusListener((status) {
+      if (status == AnimationStatus.completed && _capturingPieces.isNotEmpty) {
+        _startCaptureFade();
+      }
+    });
+
     _captureScaleAnimation = TweenSequence<double>([
+      TweenSequenceItem(tween: ConstantTween<double>(1), weight: 20),
       TweenSequenceItem(
         tween: Tween<double>(begin: 1.0, end: 1.2)
             .chain(CurveTween(curve: Curves.easeOut)),
-        weight: 25,
+        weight: 20,
       ),
       TweenSequenceItem(
         tween: Tween<double>(begin: 1.2, end: 0.0)
             .chain(CurveTween(curve: Curves.easeIn)),
-        weight: 75,
+        weight: 60,
       ),
     ]).animate(_captureAnimationController!);
 
@@ -120,7 +140,7 @@ class _AnimatedBoardWidgetState extends State<AnimatedBoardWidget>
     ).animate(
       CurvedAnimation(
         parent: _captureAnimationController!,
-        curve: const Interval(0.25, 1.0, curve: Curves.easeOut),
+        curve: Interval(0.35, 1.0, curve: widget.captureCurve),
       ),
     );
 
@@ -156,14 +176,32 @@ class _AnimatedBoardWidgetState extends State<AnimatedBoardWidget>
   @override
   void didUpdateWidget(AnimatedBoardWidget oldWidget) {
     super.didUpdateWidget(oldWidget);
+    _moveAnimationController?.duration = widget.moveDuration;
+    _captureAnimationController?.duration = widget.captureDuration;
 
     final lastMoveChanged = widget.lastMoveFrom != oldWidget.lastMoveFrom ||
         widget.lastMoveTo != oldWidget.lastMoveTo;
+    if (widget.feedbackEnabled && widget.vibrationEnabled) {
+      final moved = lastMoveChanged &&
+          widget.lastMoveTo != null &&
+          widget.boardState != oldWidget.boardState;
+      if (moved) {
+        if (widget.capturedPiecePositions.isNotEmpty) {
+          HapticFeedback.mediumImpact();
+        } else {
+          HapticFeedback.lightImpact();
+        }
+      } else if (widget.selectedPiece != null &&
+          widget.selectedPiece != oldWidget.selectedPiece) {
+        HapticFeedback.selectionClick();
+      }
+    }
     _syncSelectionPulse();
 
     if (oldWidget.animationEnabled != widget.animationEnabled) {
       if (!widget.animationEnabled) {
         _moveAnimationController?.stop();
+        _moveGeneration++;
         _captureAnimationController?.stop();
         _captureGeneration++;
         setState(() {
@@ -188,6 +226,10 @@ class _AnimatedBoardWidgetState extends State<AnimatedBoardWidget>
           _animatingPiece = null;
         });
         _moveAnimationController?.stop();
+        _moveGeneration++;
+        _captureGeneration++;
+        _captureAnimationController?.stop();
+        _capturingPieces = const {};
         return;
       }
     }
@@ -233,6 +275,7 @@ class _AnimatedBoardWidgetState extends State<AnimatedBoardWidget>
   void _playMoveAnimation(Position from, Position to, PieceType? piece) {
     if (!widget.animationEnabled) return;
     if (piece == null) return;
+    final generation = ++_moveGeneration;
 
     setState(() {
       _animatingTo = to;
@@ -245,17 +288,18 @@ class _AnimatedBoardWidgetState extends State<AnimatedBoardWidget>
     ).animate(
       CurvedAnimation(
         parent: _moveAnimationController!,
-        curve: Curves.easeOutBack, // 使用easeOutBack实现微弹效果
+        curve: widget.moveCurve,
       ),
     );
 
     _moveAnimationController!.forward(from: 0.0).then((_) {
       // 确保动画完成后立即显示棋子
-      if (mounted) {
+      if (mounted && generation == _moveGeneration) {
         setState(() {
           _animatingTo = null;
           _animatingPiece = null;
         });
+        if (_capturingPieces.isEmpty) widget.onMoveCompleted?.call();
       }
     });
   }
@@ -276,21 +320,24 @@ class _AnimatedBoardWidgetState extends State<AnimatedBoardWidget>
     }
     if (pieces.isEmpty) return;
 
-    final generation = ++_captureGeneration;
+    _captureGeneration++;
+    _captureAnimationController!.stop();
+    _captureAnimationController!.reset();
 
     setState(() {
       _capturingPieces = Map.unmodifiable(pieces);
     });
 
-    // 震动反馈
-    if (widget.vibrationEnabled) {
-      HapticFeedback.mediumImpact();
-    }
+    if (!_moveAnimationController!.isAnimating) _startCaptureFade();
+  }
 
+  void _startCaptureFade() {
+    final generation = _captureGeneration;
     _captureAnimationController!.forward(from: 0.0).then((_) {
       if (!mounted || generation != _captureGeneration) return;
       setState(() => _capturingPieces = const {});
       _captureAnimationController!.reset();
+      widget.onMoveCompleted?.call();
     });
   }
 
