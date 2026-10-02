@@ -166,6 +166,24 @@ void main() {
     grid[1][1] = 'black';
     board['grid'] = grid;
 
+    expect(
+      () => MeditationSessionSnapshot.fromJson({
+        ...json,
+        'boardState': board,
+      }),
+      throwsFormatException,
+    );
+    // A structurally valid board still has to agree with its move history.
+    grid[1][1] = 'empty';
+    grid[0][0] = 'empty';
+    grid[1][0] = 'black';
+    board['blackPieces'] = [
+      {'x': 0, 'y': 1},
+      {'x': 1, 'y': 0},
+      {'x': 2, 'y': 0},
+      {'x': 3, 'y': 0},
+    ];
+
     final decoded = MeditationSessionSnapshot.fromJson({
       ...json,
       'boardState': board,

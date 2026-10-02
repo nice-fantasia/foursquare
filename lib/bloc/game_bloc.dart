@@ -314,32 +314,15 @@ class GameBloc extends Bloc<GameEvent, GameState> {
         );
       }
 
-      await _updateStatistics(
-        completedResult,
-        newMoveHistory,
-        playing,
+      final terminal = playing.copyWith(
+        boardState: result.newBoard!,
+        moveHistory: newMoveHistory,
+        noCapturePlyCount: result.noCapturePlyCount,
+        lastMove: move,
+        lastCapturedPosition: result.captured,
+        clearLastCapturedPosition: result.captured == null,
       );
-      await _archiveCompletedGame(
-        completedResult,
-        newMoveHistory,
-        playing,
-      );
-
-      emit(
-        GameOver(
-          boardState: result.newBoard!,
-          mode: playing.mode,
-          gameResult: completedResult,
-          moveHistory: newMoveHistory,
-          noCapturePlyCount: result.noCapturePlyCount,
-          lastMove: move,
-          aiDifficulty: playing.aiDifficulty,
-          firstPlayer: playing.firstPlayer,
-          humanPlayer: playing.humanPlayer,
-        ),
-      );
-      _turnTicker?.cancel();
-      await _storageService.deleteGameSave();
+      await _completeGame(terminal, completedResult, emit);
       return;
     }
 
@@ -550,12 +533,7 @@ class GameBloc extends Bloc<GameEvent, GameState> {
         noCapturePlyCount: current.noCapturePlyCount,
       );
       if (result == null) return;
-      await _updateStatistics(result, current.moveHistory, current);
-      await _archiveCompletedGame(result, current.moveHistory, current);
-      if (!_isActiveAi(generation, playing, emit)) return;
-      emit(GameOver.fromPlaying(current, result));
-      _turnTicker?.cancel();
-      await _storageService.deleteGameSave();
+      await _completeGame(current, result, emit);
       return;
     }
     // Commit synchronously through the same authoritative move handler.
@@ -636,6 +614,7 @@ class GameBloc extends Bloc<GameEvent, GameState> {
       final restoredResult = _restoredTerminalResult(
         boardState,
         noCapturePlyCount: gameSave.noCapturePlyCount,
+        turnRemainingMilliseconds: gameSave.turnRemainingMilliseconds,
       );
       if (restoredResult != null) {
         final restoredPlaying = GamePlaying(
@@ -649,13 +628,16 @@ class GameBloc extends Bloc<GameEvent, GameState> {
           startedAt: startedAt,
           noCapturePlyCount: gameSave.noCapturePlyCount,
         );
-        emit(
-          GameOver.fromPlaying(
-            restoredPlaying,
-            _withElapsedDuration(restoredResult, restoredPlaying),
+        final elapsed = gameSave.saveTime.difference(startedAt);
+        await _completeGame(
+          restoredPlaying,
+          restoredResult.copyWith(
+            duration: elapsed.isNegative ? Duration.zero : elapsed,
           ),
+          emit,
+          completedAt: gameSave.saveTime,
+          persistTerminal: false,
         );
-        await _storageService.deleteGameSave();
         return;
       }
 
@@ -707,38 +689,69 @@ class GameBloc extends Bloc<GameEvent, GameState> {
     GamePlaying playing,
     Emitter<GameState> emit,
   ) async {
-    _aiGeneration++;
     final result = GameResult.timeout(
       timeoutPlayer: playing.currentPlayer,
       moveCount: playing.moveHistory.length,
       duration: _elapsedDuration(playing),
     );
-    await _updateStatistics(result, playing.moveHistory, playing);
-    await _archiveCompletedGame(result, playing.moveHistory, playing);
-    emit(GameOver.fromPlaying(playing, result));
+    await _completeGame(
+      playing.copyWith(turnClock: TurnClock.paused(Duration.zero)),
+      result,
+      emit,
+    );
+  }
+
+  Future<void> _completeGame(
+    GamePlaying terminal,
+    GameResult result,
+    Emitter<GameState> emit, {
+    DateTime? completedAt,
+    bool persistTerminal = true,
+  }) async {
+    final generation = ++_aiGeneration;
     _turnTicker?.cancel();
-    await _storageService.deleteGameSave();
+    emit(GameOver.fromPlaying(terminal, result));
+    final saved = !persistTerminal || await _persistGame(terminal);
+    final recorded = await _recordCompletedGame(
+      result,
+      terminal.moveHistory,
+      terminal,
+      completedAt: completedAt,
+    );
+    if (recorded) {
+      if (!isClosed &&
+          generation == _aiGeneration &&
+          state.matchId == terminal.matchId) {
+        await _storageService.deleteGameSave();
+      }
+    } else {
+      logger.warning(
+        saved
+            ? 'Completed game retained for retry'
+            : 'Unable to persist completed game',
+        'GameBloc',
+      );
+    }
   }
 
   GameResult? _restoredTerminalResult(
     BoardState boardState, {
     required int noCapturePlyCount,
+    int? turnRemainingMilliseconds,
   }) {
-    final hasPieceCountTerminal =
-        boardState.getPieceCount(PieceType.black) <= 1 ||
-            boardState.getPieceCount(PieceType.white) <= 1;
-    if (hasPieceCountTerminal) {
-      return _gameEngine.checkGameOver(boardState);
-    }
-    if (noCapturePlyCount >= 50) {
-      return GameResult.draw(
-        reason: '连续50手未发生吃子',
-        endReason: GameEndReason.noCaptureLimit,
+    final result = _gameEngine.checkGameOver(
+      boardState,
+      noCapturePlyCount: noCapturePlyCount,
+    );
+    if (result != null) return result;
+    if (turnRemainingMilliseconds == 0) {
+      return GameResult.timeout(
+        timeoutPlayer: boardState.currentPlayer,
         moveCount: _gameEngine.moveHistory.length,
         duration: _gameEngine.gameDuration,
       );
     }
-    return _gameEngine.checkGameOver(boardState);
+    return null;
   }
 
   Future<void> _onPauseTurnClock(
@@ -878,36 +891,6 @@ class GameBloc extends Bloc<GameEvent, GameState> {
     // 注意：音效/音乐的音量控制和主题切换需要在SettingsPage中直接调用服务
   }
 
-  /// 更新统计数据
-  Future<void> _updateStatistics(
-    GameResult gameResult,
-    List<Move> moveHistory,
-    GamePlaying playing,
-  ) async {
-    final winner = gameResult.winner;
-    final isWin = winner != null &&
-        (playing.mode != GameMode.pve || winner == playing.humanPlayer);
-    final isLoss = playing.mode == GameMode.pve &&
-        winner != null &&
-        winner != playing.humanPlayer;
-    final isDraw = gameResult.status == GameStatus.draw;
-
-    // 计算吃子数
-    final captures = moveHistory.fold<int>(
-      0,
-      (total, move) => total + move.captureCount,
-    );
-
-    await _storageService.updateStatistics(
-      isWin: isWin,
-      isLoss: isLoss,
-      isDraw: isDraw,
-      moves: moveHistory.length,
-      captures: captures,
-      difficulty: playing.aiDifficulty,
-    );
-  }
-
   String _createMatchId(DateTime startedAt, GameMode mode) =>
       '${startedAt.toUtc().microsecondsSinceEpoch}-${mode.name}';
 
@@ -924,16 +907,17 @@ class GameBloc extends Bloc<GameEvent, GameState> {
   ) =>
       result.copyWith(duration: _elapsedDuration(playing));
 
-  Future<void> _archiveCompletedGame(
+  Future<bool> _recordCompletedGame(
     GameResult gameResult,
     List<Move> moveHistory,
-    GamePlaying playing,
-  ) async {
-    final completedAt = _now().toUtc();
-    await _storageService.archiveGame(
+    GamePlaying playing, {
+    DateTime? completedAt,
+  }) async {
+    final endedAt = completedAt?.toUtc() ?? _now().toUtc();
+    return _storageService.recordCompletedGame(
       GameRecord(
-        id: playing.matchId ?? _createMatchId(completedAt, playing.mode),
-        completedAt: completedAt,
+        id: playing.matchId ?? _createMatchId(endedAt, playing.mode),
+        completedAt: endedAt,
         mode: playing.mode.toJson(),
         difficulty: playing.aiDifficulty,
         startingPlayer: playing.firstPlayer ?? PieceType.black,

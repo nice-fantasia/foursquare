@@ -114,19 +114,19 @@ class Move extends Equatable {
 
   /// 从Map创建（用于反序列化）
   factory Move.fromJson(Map<String, dynamic> json) {
-    final fromMap = json['from'] as Map<String, dynamic>;
-    final toMap = json['to'] as Map<String, dynamic>;
+    final fromMap = Map<String, dynamic>.from(json['from'] as Map);
+    final toMap = Map<String, dynamic>.from(json['to'] as Map);
     final capturedList = json['capturedPieces'] as List<dynamic>?;
-    final capturedMap = json['capturedPiece'] as Map<String, dynamic>?;
+    final capturedMap = json['capturedPiece'] == null
+        ? null
+        : Map<String, dynamic>.from(json['capturedPiece'] as Map);
     final capturedPieces = capturedList != null
-        ? capturedList
-            .map(
-              (item) => Position(
-                (item as Map<String, dynamic>)['x'] as int,
-                item['y'] as int,
-              ),
-            )
-            .toList(growable: false)
+        ? capturedList.map(
+            (item) {
+              final map = Map<String, dynamic>.from(item as Map);
+              return Position(map['x'] as int, map['y'] as int);
+            },
+          ).toList(growable: false)
         : <Position>[
             if (capturedMap != null)
               Position(
