@@ -28,6 +28,20 @@ BoardState boardFromRows(String rows, PieceType player) {
 }
 
 void main() {
+  test('a bounded search completes six plies without redundant root work',
+      () async {
+    var deadlineChecks = 0;
+    final ai = MinimaxAI(
+      AIDifficulty.hard,
+      elapsed: () =>
+          ++deadlineChecks <= 3600 ? Duration.zero : const Duration(seconds: 2),
+    );
+    final board = BoardState.initial();
+    final move = (await ai.selectMove(board))!;
+    expect(move.completedDepth, 6);
+    expect(move.score, referenceScore(board, PieceType.black, 6));
+  });
+
   test('an interrupted iteration preserves the last completed depth', () async {
     var expire = false;
     var checksAtThirdDepth = 0;
@@ -112,10 +126,19 @@ void main() {
   });
   test('cached search agrees with full-width reference search', () async {
     final board = boardFromRows('..BB/..../BW../.W.W', PieceType.white);
-    final ai = MinimaxAI(AIDifficulty.hard);
+    var expired = false;
+    final ai = MinimaxAI(
+      AIDifficulty.hard,
+      elapsed: () => expired ? const Duration(seconds: 2) : Duration.zero,
+    );
+    ai.setProgressCallback((_, status) {
+      if (status.startsWith('搜索深度 7/')) expired = true;
+    });
     final expected = referenceScore(board, PieceType.white, 6);
     for (var attempt = 0; attempt < 2; attempt++) {
+      expired = false;
       final move = (await ai.selectMove(board))!;
+      expect(move.completedDepth, 6);
       expect(move.score, expected);
       final next = GameEngine().simulateMove(board, move.from, move.to)!;
       expect(referenceScore(next, PieceType.white, 5), expected);

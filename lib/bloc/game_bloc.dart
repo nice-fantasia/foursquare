@@ -598,6 +598,7 @@ class GameBloc extends Bloc<GameEvent, GameState> {
 
       final boardState = gameSave.boardState.toBoardState(currentPlayer);
       final moveHistory = gameSave.moveHistory.map((m) => m.toMove()).toList();
+      final lastMove = moveHistory.isEmpty ? null : moveHistory.last;
 
       final mode = GameModeExtensions.fromJson(gameSave.mode);
       final firstPlayer = gameSave.startingPlayer == 'white'
@@ -620,6 +621,7 @@ class GameBloc extends Bloc<GameEvent, GameState> {
         final restoredPlaying = GamePlaying(
           boardState: boardState,
           moveHistory: moveHistory,
+          lastMove: lastMove,
           mode: mode,
           aiDifficulty: gameSave.aiDifficulty,
           firstPlayer: firstPlayer,
@@ -644,6 +646,7 @@ class GameBloc extends Bloc<GameEvent, GameState> {
       final restoredPlaying = GamePlaying(
         boardState: boardState,
         moveHistory: moveHistory,
+        lastMove: lastMove,
         mode: mode,
         aiDifficulty: gameSave.aiDifficulty,
         firstPlayer: firstPlayer,

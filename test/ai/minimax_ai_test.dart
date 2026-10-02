@@ -221,7 +221,7 @@ void main() {
         {
           AIDifficulty.easy: 2,
           AIDifficulty.medium: 4,
-          AIDifficulty.hard: 6,
+          AIDifficulty.hard: 8,
         },
       );
     });
@@ -286,6 +286,27 @@ void main() {
   });
 
   group('MinimaxAI 战术能力', () {
+    test('困难难度识别七手内的强制获胜路线', () async {
+      var board = createEmptyBoard(currentPlayer: PieceType.white);
+      for (final position in const [Position(1, 0), Position(1, 2)]) {
+        board = board.setPiece(position, PieceType.black);
+      }
+      for (final position in const [
+        Position(1, 3),
+        Position(0, 2),
+        Position(2, 2),
+        Position(2, 3),
+      ]) {
+        board = board.setPiece(position, PieceType.white);
+      }
+      final move =
+          (await MinimaxAI(AIDifficulty.hard, elapsed: () => Duration.zero)
+              .selectMove(board, noCapturePlyCount: 1))!;
+      final next = GameEngine().simulateMove(board, move.from, move.to)!;
+      expect(_canForceWin(next, PieceType.white, 6), isTrue);
+      expect(move.score, greaterThanOrEqualTo(10000));
+    });
+
     test('困难难度优先选择更短的强制获胜路线', () async {
       var board = createEmptyBoard(currentPlayer: PieceType.black);
       for (final position in const [
