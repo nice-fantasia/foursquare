@@ -6,6 +6,7 @@
 
 ### 执行报告
 
+- [AUTOMATIC_READINESS_NEXT_20261002.md](./tasks/AUTOMATIC_READINESS_NEXT_20261002.md) - Android 环境、规则与 AI、UI、打包、Online 及候选检查
 - [MULTI_BATCH_HARDENING_20261002.md](./tasks/MULTI_BATCH_HARDENING_20261002.md) - 当前自动队列的多批加固、验证与剩余门禁
 - [RESUME_AI_REFINEMENT_20261002.md](./tasks/RESUME_AI_REFINEMENT_20261002.md) - 续局标记恢复、困难 AI 与后续计划
 - [AUTOMATIC_QUALITY_BATCH_20261002.md](./tasks/AUTOMATIC_QUALITY_BATCH_20261002.md) - AI、持久化闭环、Android 及本地 Online 自动验证记录

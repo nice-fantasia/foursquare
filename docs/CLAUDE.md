@@ -128,7 +128,7 @@ The project uses **BLoC (Business Logic Component) architecture** with clear lay
 **3. AI System** (`lib/ai/`)
 - **MinimaxAI**: Implements minimax algorithm with alpha-beta pruning, transposition table caching, move ordering, iterative deepening, and dynamic depth adjustment
 - **BoardEvaluator**: Position evaluation considering piece count, mobility, center control, capture threats, and positional value
-- **Difficulty levels**: Easy (depth 2, 30% random), Medium (depth 3), Hard (depth 4)
+- **Difficulty levels**: Easy (base depth 2, 30% random), Medium (base depth 4), Hard (base depth 8)
 - Dynamic depth: Increases depth in endgame for precise calculation
 
 **4. Services Layer** (`lib/services/`)

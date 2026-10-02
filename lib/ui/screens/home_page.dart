@@ -224,8 +224,10 @@ class _HomePageState extends State<HomePage> {
 
   Widget _buildUtilities() {
     final l10n = AppLocalizations.of(context)!;
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
+    return Wrap(
+      alignment: WrapAlignment.center,
+      spacing: 8,
+      runSpacing: 4,
       children: [
         _UtilityButton(
           icon: Icons.insights_outlined,

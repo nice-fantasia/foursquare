@@ -22,6 +22,8 @@
 
 本次收口当前队列和验证中确认的问题；新反馈进入后续队列。交付在 PR 创建后停止，正式发布继续由下面门禁决定。
 
+后续自动就绪批次已按 Android 减动、E 盘环境、规则与 AI、UI、Android 打包、Online 多客户端及发布检查的顺序执行。首页两倍文字溢出已修复，规则不变量、6 个真实并发 Online 对局、Debug APK/AAB 和严格候选入口均已验证；Android 减动平台断言通过但测试 harness 曾自动卸载专用 AVD 旧包，按证据边界保留部分状态。完整结果见 [自动就绪加固报告](reports/tasks/AUTOMATIC_READINESS_NEXT_20261002.md)。
+
 ## 3. 需要设备或环境后推进
 
 1. Android：补充系统版本矩阵；真机 Profile/Release 的困难 AI、持续走棋、动画、内存趋势和长期运行；真实低内存/低存储及进程重启。

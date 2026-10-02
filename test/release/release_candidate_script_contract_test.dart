@@ -89,6 +89,26 @@ void main() {
       expect(source, contains(r'[switch]$Strict'));
     });
 
+    test('builds both debug artifacts and blocks tracked signing material', () {
+      final source = _readRequired(verificationScript);
+
+      expect(source, contains('android-debug-apk'));
+      expect(source, contains('android-debug-aab'));
+      expect(source, contains('app-debug.apk'));
+      expect(source, contains('app-debug.aab'));
+      expect(source, contains('tracked-sensitive-files'));
+      expect(source, contains('ls-files'));
+      for (final suffix in const [
+        '.jks',
+        '.keystore',
+        '.p12',
+        '.pfx',
+        'key.properties',
+      ]) {
+        expect(source, contains(suffix));
+      }
+    });
+
     test('machine-result parsing ignores JSON events without a type field', () {
       final source = _readRequired(verificationScript);
 
@@ -103,8 +123,12 @@ void main() {
 
       expect(readme, contains('verify_release_candidate.ps1'));
       expect(readme, contains('-IncludeAndroidSmoke'));
+      expect(readme, contains('Debug AAB'));
+      expect(readme, contains('签名材料'));
       expect(strategy, contains('verify_release_candidate.ps1'));
       expect(strategy, contains('-IncludeAndroidSmoke'));
+      expect(strategy, contains('Debug AAB'));
+      expect(strategy, contains('签名材料'));
       expect(
         strategy,
         isNot(
