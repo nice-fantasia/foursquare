@@ -397,7 +397,7 @@ class _GamePageViewState extends State<GamePageView>
       return state.firstPlayer == PieceType.white;
     }
     if (state.mode == GameMode.pve) {
-      return state.humanPlayer == PieceType.white;
+      return state.humanPlayer == PieceType.black;
     }
     return false;
   }

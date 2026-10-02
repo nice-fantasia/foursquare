@@ -89,7 +89,10 @@ class AudioCoordinator {
   SharedPreferences? _prefs;
 
   AudioSettings _settings = AudioSettings.defaultSettings;
-  GameScene _currentScene = GameScene.mainMenu;
+  GameScene? _currentScene;
+  Future<void>? _initialization;
+  int _sceneGeneration = 0;
+  bool _suspended = false;
   bool _isVoicePlaying = false;
   bool _voiceProcessing = false;
   double _originalMusicVolume = 0.4;
@@ -104,7 +107,9 @@ class AudioCoordinator {
   AudioSettings get settings => _settings;
 
   /// 初始化音频协调器
-  Future<void> initialize() async {
+  Future<void> initialize() => _initialization ??= _initialize();
+
+  Future<void> _initialize() async {
     try {
       // 初始化SharedPreferences
       _prefs = await SharedPreferences.getInstance();
@@ -153,11 +158,11 @@ class AudioCoordinator {
   /// 应用设置到各服务
   Future<void> _applySettings() async {
     // 音效设置
-    _audioService.setEnabled(_settings.soundEnabled);
+    await _audioService.setEnabled(_settings.soundEnabled);
     _audioService.setVolume(_settings.soundVolume);
 
     // 音乐设置
-    await _musicService.setEnabled(_settings.musicEnabled);
+    await _musicService.setEnabled(_settings.musicEnabled && !_suspended);
     await _musicService.setVolume(_settings.musicVolume);
     _originalMusicVolume = _settings.musicVolume;
 
@@ -190,6 +195,7 @@ class AudioCoordinator {
 
   /// 响应游戏事件
   void onGameEvent(GameEvent event, {Map<String, dynamic>? data}) {
+    if (_suspended) return;
     if (!_settings.soundEnabled && !_settings.voiceEnabled) return;
 
     switch (event) {
@@ -258,8 +264,14 @@ class AudioCoordinator {
   /// 场景切换
   Future<void> onSceneChange(GameScene scene) async {
     if (_currentScene == scene) return;
+    final generation = ++_sceneGeneration;
     _currentScene = scene;
+    await initialize();
+    if (generation != _sceneGeneration || _suspended) return;
+    await _playSceneMusic(scene);
+  }
 
+  Future<void> _playSceneMusic(GameScene scene) async {
     if (!_settings.musicEnabled) return;
 
     switch (scene) {
@@ -373,7 +385,10 @@ class AudioCoordinator {
 
   /// 停止所有音频
   Future<void> stopAll() async {
-    await _musicService.stopMusic();
+    _sceneGeneration++;
+    _currentScene = null;
+    _voiceQueue.clear();
+    await Future.wait([_musicService.stopMusic(), _audioService.stopAll()]);
     if (_voiceInitialized) {
       await _voiceService.stop();
     }
@@ -381,7 +396,9 @@ class AudioCoordinator {
 
   /// 暂停所有音频
   Future<void> pauseAll() async {
-    await _musicService.pauseMusic();
+    if (_suspended) return;
+    _suspended = true;
+    await Future.wait([_musicService.pauseMusic(), _audioService.stopAll()]);
     if (_voiceInitialized) {
       await _voiceService.pause();
     }
@@ -389,18 +406,28 @@ class AudioCoordinator {
 
   /// 恢复所有音频
   Future<void> resumeAll() async {
-    if (_settings.musicEnabled) {
-      await _musicService.resumeMusic();
-    }
+    if (!_suspended) return;
+    _suspended = false;
+    final scene = _currentScene;
+    final generation = _sceneGeneration;
+    if (scene == null) return;
+    await initialize();
+    if (_suspended || generation != _sceneGeneration) return;
+    await _musicService.setEnabled(_settings.musicEnabled);
+    if (_suspended || generation != _sceneGeneration) return;
+    await _playSceneMusic(scene);
   }
 
   /// 释放资源
   Future<void> dispose() async {
+    await stopAll();
+    await _initialization;
     await _audioService.dispose();
     await _musicService.dispose();
     if (_voiceInitialized) {
       await _voiceService.dispose();
     }
+    _initialization = null;
   }
 }
 

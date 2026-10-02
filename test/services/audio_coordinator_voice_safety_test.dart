@@ -32,6 +32,7 @@ void main() {
     voiceService = _MockVoiceSynthesisService();
 
     when(() => audioService.initialize()).thenAnswer((_) async {});
+    when(() => audioService.setEnabled(any())).thenAnswer((_) async {});
     when(() => musicService.initialize()).thenAnswer((_) async {});
     when(() => musicService.setEnabled(any())).thenAnswer((_) async {});
     when(() => musicService.setVolume(any())).thenAnswer((_) async {});

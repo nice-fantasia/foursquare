@@ -32,19 +32,30 @@ enum SoundType {
 class AudioService {
   static final AudioService _instance = AudioService._internal();
   factory AudioService() => _instance;
-  AudioService._internal();
+  AudioService._internal() : _playerFactory = AudioPlayer.new;
+
+  AudioService.forTesting({required AudioPlayer Function() playerFactory})
+      : _playerFactory = playerFactory;
+
+  final AudioPlayer Function() _playerFactory;
+  Future<void>? _initialization;
+  int _generation = 0;
+  final Map<SoundType, Future<void>> _operations = {};
 
   final Map<SoundType, AudioPlayer> _players = {};
   bool _enabled = true;
   double _volume = 0.7;
 
   /// 初始化音频服务
-  Future<void> initialize() async {
+  Future<void> initialize() => _initialization ??= _initialize();
+
+  Future<void> _initialize() async {
     try {
       // 为每种音效创建独立的播放器
       for (final type in SoundType.values) {
-        _players[type] = AudioPlayer();
+        _players[type] = _playerFactory();
         await _players[type]!.setVolume(_volume);
+        await _players[type]!.setReleaseMode(ReleaseMode.stop);
       }
 
       // 预加载音效文件
@@ -78,28 +89,41 @@ class AudioService {
   }
 
   /// 播放音效
-  void playSound(SoundType type) {
+  Future<void> playSound(SoundType type) async {
     if (!_enabled) return;
-
-    try {
+    final generation = _generation;
+    await _enqueue(type, () async {
+      if (!_enabled || generation != _generation) return;
       final player = _players[type];
-      if (player == null) {
-        logger.warning('音效播放器未初始化: $type', 'AudioService');
-        return;
-      }
+      if (player == null) return;
+      await player.stop();
+      if (!_enabled || generation != _generation) return;
+      await player.resume();
+    });
+  }
 
-      // 停止当前播放并重新开始
-      player.stop();
-      player.resume();
-    } catch (e) {
-      logger.error('播放音效失败: $type', 'AudioService', e);
-      // 音效播放失败不抛出异常，仅记录日志
-    }
+  Future<void> _enqueue(SoundType type, Future<void> Function() action) {
+    final operation = (_operations[type] ?? Future<void>.value())
+        .then((_) => action())
+        .catchError((Object error) {
+      logger.error('音效操作失败', 'AudioService', error);
+    });
+    _operations[type] = operation;
+    return operation;
+  }
+
+  Future<void> stopAll() async {
+    _generation++;
+    await Future.wait([
+      for (final entry in _players.entries)
+        _enqueue(entry.key, entry.value.stop),
+    ]);
   }
 
   /// 设置音效开关
-  void setEnabled(bool enabled) {
+  Future<void> setEnabled(bool enabled) async {
     _enabled = enabled;
+    if (!enabled) await stopAll();
   }
 
   /// 获取音效开关状态
@@ -118,9 +142,13 @@ class AudioService {
 
   /// 释放资源
   Future<void> dispose() async {
+    await stopAll();
+    await _initialization;
     for (final player in _players.values) {
       await player.dispose();
     }
     _players.clear();
+    _operations.clear();
+    _initialization = null;
   }
 }
