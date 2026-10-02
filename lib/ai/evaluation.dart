@@ -18,8 +18,8 @@ class BoardEvaluator {
   /// 评估棋盘局面
   ///
   /// 返回分数：
-  /// - 正数表示白方优势
-  /// - 负数表示黑方优势
+  /// - 正数表示传入 player 一方有优势
+  /// - 负数表示其对手有优势
   /// - 0表示均势
   static int evaluate(BoardState board, PieceType player) {
     int score = 0;

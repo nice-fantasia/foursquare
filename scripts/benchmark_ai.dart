@@ -7,6 +7,7 @@ import 'package:foursquare/engine/game_engine.dart';
 import 'package:foursquare/models/board_state.dart';
 import 'package:foursquare/models/piece_type.dart';
 import 'package:foursquare/models/position.dart';
+import 'ai_position_diagnostics.dart';
 
 /// Reproducible strength sample, not a statistical release gate.
 /// Run: dart run scripts/benchmark_ai.dart [games-per-pair, even, 2..20] [seed]
@@ -53,13 +54,11 @@ Future<void> main(List<String> arguments) async {
       }
       var timedOutSearches = 0;
       var maxSearchMicros = 0;
-      var positionRevisits = 0;
-      final seenPositions = <String>{};
+      final repetitions = PositionRepetitionDiagnostics();
       final searchTimes = <int>[];
       final completedDepths = <int, int>{};
       for (var ply = 0; ply < 400; ply++) {
-        final positionKey = '${board.grid}:${board.currentPlayer}';
-        if (!seenPositions.add(positionKey)) positionRevisits++;
+        repetitions.observe(board);
         final difficulty = board.currentPlayer == stronger ? pair.$1 : pair.$2;
         // Match the production caller: each turn gets a fresh AI instance.
         final ai = MinimaxAI(difficulty, random: Random(seed + ply));
@@ -103,7 +102,10 @@ Future<void> main(List<String> arguments) async {
               'maxSearchMicros': maxSearchMicros,
               'p95SearchMicros':
                   searchTimes[(searchTimes.length * 0.95).ceil() - 1],
-              'positionRevisits': positionRevisits,
+              'positionRevisits': repetitions.revisits,
+              'maxPositionVisits': repetitions.maxVisits,
+              'shortestRepeatCycle': repetitions.shortestCycle,
+              'noCapturePlyCountAtEnd': count,
               'completedDepthCounts': {
                 for (final e in completedDepths.entries) '${e.key}': e.value,
               },

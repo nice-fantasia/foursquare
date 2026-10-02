@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 import 'package:flutter/material.dart';
@@ -14,6 +15,7 @@ import 'package:foursquare/engine/game_engine.dart';
 import 'package:foursquare/models/board_state.dart';
 import 'package:foursquare/models/game_result.dart';
 import 'package:foursquare/models/game_record.dart';
+import 'package:foursquare/models/game_save.dart';
 import 'package:foursquare/models/move.dart';
 import 'package:foursquare/models/piece_type.dart';
 import 'package:foursquare/models/position.dart';
@@ -25,6 +27,7 @@ import 'package:foursquare/ui/screens/game_history_page.dart';
 import 'package:foursquare/ui/screens/game_page.dart';
 import 'package:foursquare/ui/screens/game_replay_page.dart';
 import 'package:foursquare/ui/widgets/themed_board_widget.dart';
+import 'package:foursquare/ui/widgets/first_player_indicator.dart';
 
 class _Audio extends Mock implements audio.AudioCoordinator {}
 
@@ -38,6 +41,37 @@ class _FailsOnceStorage extends StorageService {
       failNextCompletion = false;
       return Future.value(false);
     }
+    return super.recordCompletedGame(record);
+  }
+}
+
+class _DelayedReadStorage extends StorageService {
+  _DelayedReadStorage(Box<dynamic> statistics, Box<dynamic> saves)
+      : super.forTesting(statisticsBox: statistics, gameSaveBox: saves);
+  bool deferNextRead = false;
+  final readStarted = Completer<void>();
+  final releaseRead = Completer<void>();
+
+  @override
+  Future<GameSave?> loadGame() async {
+    if (!deferNextRead) return super.loadGame();
+    deferNextRead = false;
+    final snapshot = await super.loadGame();
+    readStarted.complete();
+    await releaseRead.future;
+    return snapshot;
+  }
+}
+
+class _DelayedCompletionStorage extends StorageService {
+  _DelayedCompletionStorage(Box<dynamic> statistics, Box<dynamic> saves)
+      : super.forTesting(statisticsBox: statistics, gameSaveBox: saves);
+  final completionStarted = Completer<void>();
+  final releaseCompletion = Completer<void>();
+  @override
+  Future<bool> recordCompletedGame(GameRecord record) async {
+    completionStarted.complete();
+    await releaseCompletion.future;
     return super.recordCompletedGame(record);
   }
 }
@@ -71,6 +105,324 @@ void main() {
   tearDown(() async {
     await storage.dispose();
     await directory.delete(recursive: true);
+  });
+
+  testWidgets('asynchronous starts and restarts announce each starter once',
+      (tester) async {
+    final bloc = (await tester.runAsync(
+      () async => GameBloc(
+        storageService: storage,
+        audioCoordinator: sound,
+        startingPlayerPicker: () => PieceType.white,
+      ),
+    ))!;
+    addTearDown(bloc.close);
+    await tester.pumpWidget(
+      MaterialApp(
+        locale: const Locale('zh'),
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: BlocProvider.value(value: bloc, child: const GamePageView()),
+      ),
+    );
+    await tester.runAsync(() async {
+      final started = bloc.stream.firstWhere((state) => state is GamePlaying);
+      bloc.add(const NewGameEvent(mode: GameMode.pvp));
+      await started.timeout(const Duration(seconds: 5));
+    });
+    await tester.pump();
+    expect(
+      tester
+          .widget<FirstPlayerIndicator>(find.byType(FirstPlayerIndicator))
+          .firstPlayer,
+      PieceType.white,
+    );
+    await tester.pump(const Duration(seconds: 3));
+    await tester.runAsync(() async {
+      final selected =
+          bloc.stream.firstWhere((state) => state.selectedPiece != null);
+      bloc.add(const SelectPieceEvent(Position(0, 3)));
+      await selected.timeout(const Duration(seconds: 5));
+    });
+    await tester.pump();
+    expect(find.byType(FirstPlayerIndicator), findsNothing);
+    await tester.runAsync(() async {
+      final oldId = bloc.state.matchId;
+      final restarted =
+          bloc.stream.firstWhere((state) => state.matchId != oldId);
+      bloc.add(const RestartGameEvent());
+      await restarted.timeout(const Duration(seconds: 5));
+    });
+    await tester.pump();
+    expect(
+      tester
+          .widget<FirstPlayerIndicator>(find.byType(FirstPlayerIndicator))
+          .firstPlayer,
+      PieceType.black,
+    );
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  test(
+      'a late successful completion records the old game and retains the new save',
+      () async {
+    final delayed = _DelayedCompletionStorage(statistics, saves);
+    storage = delayed;
+    final fixture = await _naturalGame(PieceType.black);
+    var now = DateTime.utc(2026, 10, 2);
+    final bloc = GameBloc(
+      storageService: storage,
+      audioCoordinator: sound,
+      now: () => now,
+      startingPlayerPicker: () => PieceType.black,
+    );
+    addTearDown(bloc.close);
+    addTearDown(() {
+      if (!delayed.releaseCompletion.isCompleted) {
+        delayed.releaseCompletion.complete();
+      }
+    });
+    final started = bloc.stream.firstWhere((state) => state is GamePlaying);
+    bloc.add(const NewGameEvent(mode: GameMode.pvp));
+    final oldId = (await started).matchId;
+    for (var step = 0; step < fixture.moves.length; step++) {
+      final moved = bloc.stream
+          .firstWhere((state) => state.moveHistory.length == step + 1);
+      final move = fixture.moves[step];
+      bloc.add(MovePieceEvent(from: move.from, to: move.to));
+      await moved.timeout(const Duration(seconds: 5));
+    }
+    await delayed.completionStarted.future.timeout(const Duration(seconds: 5));
+    now = now.add(const Duration(minutes: 1));
+    final fresh = bloc.stream
+        .firstWhere((state) => state is GamePlaying && state.matchId != oldId);
+    bloc.add(const NewGameEvent(mode: GameMode.pvp));
+    final newId = (await fresh).matchId;
+    final moved =
+        bloc.stream.firstWhere((state) => state.moveHistory.length == 1);
+    bloc.add(const MovePieceEvent(from: Position(1, 0), to: Position(1, 1)));
+    await moved;
+    await _waitUntil(() async => (await storage.loadGame())?.matchId == newId);
+    delayed.releaseCompletion.complete();
+    await _waitUntil(
+      () async => (await storage.loadStatistics()).totalGames == 1,
+    );
+    await pumpEventQueue();
+    expect((await storage.loadGame())!.matchId, newId);
+    expect(bloc.state.matchId, newId);
+    expect((await storage.loadGameHistory()).single.id, oldId);
+  });
+
+  test('capture undo redo and reopen keep rule state and move markers coherent',
+      () async {
+    final fixture = await _naturalGame(PieceType.black);
+    final capture = fixture.moves.indexWhere((move) => move.captureCount > 0);
+    expect(capture, inInclusiveRange(0, fixture.moves.length - 2));
+    final bloc = GameBloc(
+      storageService: storage,
+      audioCoordinator: sound,
+      startingPlayerPicker: () => PieceType.black,
+    );
+    addTearDown(bloc.close);
+    final started = bloc.stream.firstWhere((state) => state is GamePlaying);
+    bloc.add(const NewGameEvent(mode: GameMode.pvp));
+    await started;
+    for (var step = 0; step <= capture; step++) {
+      final moved = bloc.stream
+          .firstWhere((state) => state.moveHistory.length == step + 1);
+      final move = fixture.moves[step];
+      bloc.add(MovePieceEvent(from: move.from, to: move.to));
+      await moved;
+    }
+    await _waitUntil(
+      () async => (await storage.loadGame())?.moveHistory.length == capture + 1,
+    );
+    final captured = bloc.state;
+    final undone =
+        bloc.stream.firstWhere((state) => state.moveHistory.length == capture);
+    bloc.add(const UndoMoveEvent());
+    final afterUndo = await undone;
+    expect(
+      afterUndo.boardState,
+      capture == 0 ? BoardState.initial() : fixture.boards[capture - 1],
+    );
+    expect(
+      afterUndo.lastMove,
+      capture == 0 ? null : captured.moveHistory[capture - 1],
+    );
+    final redone = bloc.stream
+        .firstWhere((state) => state.moveHistory.length == capture + 1);
+    bloc.add(const RedoMoveEvent());
+    final afterRedo = await redone;
+    expect(afterRedo.boardState, captured.boardState);
+    expect(afterRedo.moveHistory, captured.moveHistory);
+    expect(afterRedo.noCapturePlyCount, captured.noCapturePlyCount);
+    expect(afterRedo.lastMove, captured.lastMove);
+    await _waitUntil(
+      () async => (await storage.loadGame())?.moveHistory.length == capture + 1,
+    );
+    await bloc.close();
+    final restored = GameBloc(storageService: storage, audioCoordinator: sound);
+    addTearDown(restored.close);
+    final loaded = restored.stream.firstWhere((state) => state is GamePlaying);
+    restored.add(const LoadGameEvent());
+    final state = await loaded;
+    expect(state.boardState, captured.boardState);
+    expect(state.lastMove, captured.lastMove);
+    expect(state.noCapturePlyCount, captured.noCapturePlyCount);
+  });
+
+  test('a late saved-game read cannot overwrite a new game or its engine',
+      () async {
+    final delayed = _DelayedReadStorage(statistics, saves);
+    storage = delayed;
+    var now = DateTime.utc(2026, 10, 2);
+    final bloc = GameBloc(
+      storageService: storage,
+      audioCoordinator: sound,
+      now: () => now,
+      startingPlayerPicker: () => PieceType.black,
+    );
+    addTearDown(bloc.close);
+    addTearDown(() {
+      if (!delayed.releaseRead.isCompleted) delayed.releaseRead.complete();
+    });
+    final started = bloc.stream.firstWhere((state) => state is GamePlaying);
+    bloc.add(const NewGameEvent(mode: GameMode.pvp));
+    final oldId = (await started).matchId;
+    final moved =
+        bloc.stream.firstWhere((state) => state.moveHistory.length == 1);
+    bloc.add(const MovePieceEvent(from: Position(0, 0), to: Position(0, 1)));
+    await moved;
+    await _waitUntil(
+      () async => (await storage.loadGame())?.moveHistory.length == 1,
+    );
+    delayed.deferNextRead = true;
+    bloc.add(const LoadGameEvent());
+    await delayed.readStarted.future.timeout(const Duration(seconds: 5));
+    now = now.add(const Duration(minutes: 1));
+    final fresh = bloc.stream
+        .firstWhere((state) => state is GamePlaying && state.matchId != oldId);
+    bloc.add(const NewGameEvent(mode: GameMode.pvp));
+    final newId = (await fresh).matchId;
+    final newMove =
+        bloc.stream.firstWhere((state) => state.moveHistory.length == 1);
+    bloc.add(const MovePieceEvent(from: Position(1, 0), to: Position(1, 1)));
+    await newMove;
+    await _waitUntil(() async => (await storage.loadGame())?.matchId == newId);
+    final checkpoint = bloc.state;
+    delayed.releaseRead.complete();
+    await pumpEventQueue();
+    expect(bloc.state.matchId, newId);
+    expect(bloc.state.boardState, checkpoint.boardState);
+    expect(bloc.state.moveHistory, checkpoint.moveHistory);
+    expect((await storage.loadGame())!.matchId, newId);
+    final advanced =
+        bloc.stream.firstWhere((state) => state.moveHistory.length == 2);
+    bloc.add(const MovePieceEvent(from: Position(1, 3), to: Position(1, 2)));
+    final next = await advanced.timeout(const Duration(seconds: 5));
+    expect(next.moveHistory.first.from, const Position(1, 0));
+    expect(next.matchId, newId);
+  });
+
+  test('a late saved-game read cannot unpause the current game', () async {
+    final delayed = _DelayedReadStorage(statistics, saves);
+    storage = delayed;
+    var now = DateTime.utc(2026, 10, 2);
+    final bloc = GameBloc(
+      storageService: storage,
+      audioCoordinator: sound,
+      now: () => now,
+      startingPlayerPicker: () => PieceType.black,
+    );
+    addTearDown(bloc.close);
+    addTearDown(() {
+      if (!delayed.releaseRead.isCompleted) delayed.releaseRead.complete();
+    });
+    final started = bloc.stream.firstWhere((state) => state is GamePlaying);
+    bloc.add(const NewGameEvent(mode: GameMode.pvp));
+    await started;
+    bloc.add(const SaveGameEvent());
+    await _waitUntil(storage.hasSavedGame);
+    delayed.deferNextRead = true;
+    bloc.add(const LoadGameEvent());
+    await delayed.readStarted.future.timeout(const Duration(seconds: 5));
+    now = now.add(const Duration(seconds: 10));
+    final paused = bloc.stream.firstWhere(
+      (state) => state is GamePlaying && state.turnClock!.isPaused,
+    );
+    bloc.add(PauseTurnClockEvent(now));
+    await paused;
+    await _waitUntil(
+      () async =>
+          (await storage.loadGame())?.turnRemainingMilliseconds == 50000,
+    );
+    delayed.releaseRead.complete();
+    await pumpEventQueue();
+    final state = bloc.state as GamePlaying;
+    expect(state.turnClock!.isPaused, isTrue);
+    expect(state.turnClock!.remainingAt(now), const Duration(seconds: 50));
+    expect((await storage.loadGame())!.turnRemainingMilliseconds, 50000);
+  });
+
+  testWidgets(
+      'backgrounding during an initial delayed load pauses the restored clock',
+      (tester) async {
+    late _DelayedReadStorage delayed;
+    final bloc = (await tester.runAsync(() async {
+      delayed = _DelayedReadStorage(statistics, saves);
+      storage = delayed;
+      final now = DateTime.now();
+      await storage.saveGame(
+        GameSave(
+          id: 'background-save',
+          matchId: 'background-match',
+          saveTime: now,
+          startedAt: now.subtract(const Duration(seconds: 15)),
+          boardState: BoardStateData.fromBoardState(BoardState.initial()),
+          moveHistory: const [],
+          currentPlayer: 'black',
+          mode: 'pvp',
+          turnRemainingMilliseconds: 45000,
+        ),
+      );
+      final bloc = GameBloc(storageService: storage, audioCoordinator: sound);
+      delayed.deferNextRead = true;
+      bloc.add(const LoadGameEvent());
+      await delayed.readStarted.future.timeout(const Duration(seconds: 5));
+      return bloc;
+    }))!;
+    addTearDown(bloc.close);
+    addTearDown(() {
+      if (!delayed.releaseRead.isCompleted) delayed.releaseRead.complete();
+    });
+    await tester.pumpWidget(
+      MaterialApp(
+        locale: const Locale('zh'),
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: BlocProvider.value(value: bloc, child: const GamePageView()),
+      ),
+    );
+    final observer =
+        tester.state(find.byType(GamePageView)) as WidgetsBindingObserver;
+    observer.didChangeAppLifecycleState(AppLifecycleState.paused);
+    await tester.pump();
+    await tester.runAsync(() async {
+      delayed.releaseRead.complete();
+      await pumpEventQueue();
+    });
+    await tester.pump();
+    await tester.runAsync(() => pumpEventQueue());
+    final clock = (bloc.state as GamePlaying).turnClock!;
+    expect(clock.isPaused, isTrue);
+    expect(
+      clock.remainingAt(DateTime.now()).inMilliseconds,
+      inInclusiveRange(40000, 45000),
+    );
+    observer.didChangeAppLifecycleState(AppLifecycleState.resumed);
+    await tester.pump();
+    await tester.pumpWidget(const SizedBox());
   });
 
   test('reopening an active save preserves the last move and captures',
@@ -190,6 +542,7 @@ void main() {
       expect(board.lastMoveTo, const Position(0, 1));
       expect(find.bySemanticsLabel(RegExp('上一手起点')), findsOneWidget);
       expect(find.bySemanticsLabel(RegExp('上一手终点')), findsOneWidget);
+      expect(find.byType(FirstPlayerIndicator), findsNothing);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
     } finally {

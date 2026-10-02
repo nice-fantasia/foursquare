@@ -101,6 +101,8 @@ class _GamePageViewState extends State<GamePageView>
 
   /// 是否显示先手方提示动画
   bool _showFirstPlayerIndicator = false;
+  bool _openingAnnouncementShown = false;
+  String? _announcedMatchId;
 
   /// 先手方
   PieceType? _firstPlayer;
@@ -163,13 +165,19 @@ class _GamePageViewState extends State<GamePageView>
 
   /// 检查是否需要显示先手提示
   void _checkFirstPlayerIndicator() {
+    if (!mounted) return;
     final state = context.read<GameBloc>().state;
-    if (state is GamePlaying &&
+    if (_appIsActive &&
+        state is GamePlaying &&
+        state.moveHistory.isEmpty &&
         state.firstPlayer != null &&
-        state.mode == GameMode.pvp) {
+        state.mode == GameMode.pvp &&
+        (!_openingAnnouncementShown || state.matchId != _announcedMatchId)) {
       setState(() {
         _firstPlayer = state.firstPlayer;
         _showFirstPlayerIndicator = true;
+        _openingAnnouncementShown = true;
+        _announcedMatchId = state.matchId;
       });
     }
   }
@@ -177,6 +185,7 @@ class _GamePageViewState extends State<GamePageView>
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final announcementId = _announcedMatchId;
     final scheme = theme.colorScheme;
     final l10n = AppLocalizations.of(context)!;
     return Scaffold(
@@ -262,8 +271,10 @@ class _GamePageViewState extends State<GamePageView>
               color: Colors.black.withValues(alpha: 0.5),
               child: Center(
                 child: FirstPlayerIndicator(
+                  key: ValueKey(announcementId),
                   firstPlayer: _firstPlayer!,
                   onAnimationComplete: () {
+                    if (!mounted || announcementId != _announcedMatchId) return;
                     setState(() {
                       _showFirstPlayerIndicator = false;
                     });
@@ -589,6 +600,14 @@ class _GamePageViewState extends State<GamePageView>
   }
 
   void _onGameStateChanged(GameState state) {
+    if (!_appIsActive &&
+        state is GamePlaying &&
+        (state.mode == GameMode.pvp || state.mode == GameMode.pve) &&
+        state.turnClock != null &&
+        !state.turnClock!.isPaused) {
+      context.read<GameBloc>().add(PauseTurnClockEvent(DateTime.now()));
+    }
+    _checkFirstPlayerIndicator();
     final session = _voiceSession;
     if (session == null) return;
     unawaited(

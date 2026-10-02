@@ -48,6 +48,8 @@ dart run scripts/benchmark_ai.dart 20 20261002
 
 第一参数是每个配对的局数（偶数，2–20，默认 4），第二参数是随机种子（默认 20260921）。配对为中等/简单、困难/简单、困难/中等，轮换先手并交换较强档的执色；每回合创建新 AI，保持与普通 PVE 调用方式一致。逐局 JSON 包含搜索 P95/最大耗时、完成深度分布、重复局面次数和终局原因。计时是当前机器的 Dart 样本，Android 性能需另在真机 Profile/Release 取样；有限对局不构成普遍棋力证明。
 
+循环诊断额外输出 `maxPositionVisits`（同棋盘与行棋方的最多出现次数）、`shortestRepeatCycle`（最近相同位置之间的最短 ply 间隔，无重复时 null）和 `noCapturePlyCountAtEnd`。诊断键忽略棋子列表顺序及未吃计数；重复位置不会提前结束对局。至少 4 局覆盖两种先手。
+
 ### 资源生成（Windows）
 
 ```powershell
