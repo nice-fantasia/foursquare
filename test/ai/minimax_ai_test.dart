@@ -42,6 +42,10 @@ void main() {
   });
 
   group('MinimaxAI 基础功能', () {
+    test('困难说明描述有限前瞻能力', () {
+      expect(AIDifficulty.hard.description, contains('深入'));
+      expect(AIDifficulty.hard.description, isNot(contains('最优')));
+    });
     test('应该创建正确难度的AI', () {
       final easyAI = MinimaxAI(AIDifficulty.easy);
       expect(easyAI.difficulty, equals(AIDifficulty.easy));

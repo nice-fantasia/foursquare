@@ -33,7 +33,7 @@ enum AIDifficulty {
       case AIDifficulty.medium:
         return 'AI会认真思考，有一定挑战性'; // 从"会认真思考"修改
       case AIDifficulty.hard:
-        return 'AI使用最优策略，难以战胜'; // 从"会使用最优策略"修改
+        return 'AI会更深入地计算局面';
     }
   }
 
