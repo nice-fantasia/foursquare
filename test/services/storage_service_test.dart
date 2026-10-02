@@ -265,6 +265,97 @@ void main() {
       expect(gameSaveBox.containsKey('current_game_save'), isTrue);
     });
 
+    test('unsupported save version is retained but cannot be continued',
+        () async {
+      final save = GameSave(
+        id: 'future-save',
+        saveTime: DateTime.utc(2026, 10, 2),
+        boardState: BoardStateData.fromBoardState(BoardState.initial()),
+        moveHistory: const [],
+        currentPlayer: 'black',
+        mode: 'pvp',
+      );
+      final json = save.toJson()..['schemaVersion'] = 99;
+      await gameSaveBox.put('current_game_save', json);
+      expect(await storageService.loadGame(), isNull);
+      expect(await storageService.hasSavedGame(), isFalse);
+      expect(gameSaveBox.get('current_game_save')['schemaVersion'], 99);
+    });
+
+    test('malformed board shape is retained but cannot be continued', () async {
+      final save = GameSave(
+        id: 'invalid-board',
+        saveTime: DateTime.utc(2026, 10, 2),
+        boardState: BoardStateData.fromBoardState(BoardState.initial()),
+        moveHistory: const [],
+        currentPlayer: 'black',
+        mode: 'pvp',
+      );
+      final json = save.toJson();
+      (json['boardState']['grid'] as List).removeLast();
+      await gameSaveBox.put('current_game_save', json);
+      expect(await storageService.loadGame(), isNull);
+      expect(gameSaveBox.containsKey('current_game_save'), isTrue);
+    });
+
+    test('invalid save enums and clock counters are rejected without deletion',
+        () async {
+      final save = GameSave(
+        id: 'invalid-state',
+        saveTime: DateTime.utc(2026, 10, 2),
+        boardState: BoardStateData.fromBoardState(BoardState.initial()),
+        moveHistory: const [],
+        currentPlayer: 'black',
+        mode: 'pvp',
+      );
+      for (final field in <MapEntry<String, Object>>[
+        const MapEntry('currentPlayer', 'empty'),
+        const MapEntry('startingPlayer', 'unknown'),
+        const MapEntry('humanPlayer', 'empty'),
+        const MapEntry('mode', 'unknown'),
+        const MapEntry('aiDifficulty', 'unknown'),
+        const MapEntry('noCapturePlyCount', -1),
+        const MapEntry('noCapturePlyCount', 51),
+        const MapEntry('turnRemainingMilliseconds', -1),
+        const MapEntry('turnRemainingMilliseconds', 60001),
+      ]) {
+        final json = save.toJson()..[field.key] = field.value;
+        await gameSaveBox.put('current_game_save', json);
+        expect(
+          await storageService.loadGame(),
+          isNull,
+          reason: '${field.key}=${field.value}',
+        );
+        expect(gameSaveBox.containsKey('current_game_save'), isTrue);
+      }
+    });
+
+    test('board grid and piece lists must agree before a save is continued',
+        () async {
+      final corruptions = <void Function(Map<String, dynamic>)>[
+        (json) => json['boardState']['grid'][0][0] = 'unknown',
+        (json) => (json['boardState']['blackPieces'] as List).removeLast(),
+        (json) =>
+            (json['boardState']['blackPieces'] as List).add({'x': 0, 'y': 0}),
+        (json) => json['boardState']['blackPieces'][0]['x'] = 99,
+      ];
+      for (final corrupt in corruptions) {
+        final save = GameSave(
+          id: 'invalid-pieces',
+          saveTime: DateTime.utc(2026, 10, 2),
+          boardState: BoardStateData.fromBoardState(BoardState.initial()),
+          moveHistory: const [],
+          currentPlayer: 'black',
+          mode: 'pvp',
+        );
+        final json = save.toJson();
+        corrupt(json);
+        await gameSaveBox.put('current_game_save', json);
+        expect(await storageService.loadGame(), isNull);
+        expect(gameSaveBox.containsKey('current_game_save'), isTrue);
+      }
+    });
+
     test('Hive重新打开后完整恢复进行中存档', () async {
       final move = Move(
         from: const Position(0, 0),

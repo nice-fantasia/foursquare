@@ -69,8 +69,28 @@ class GameSave extends Equatable {
       };
 
   factory GameSave.fromJson(Map<String, dynamic> json) {
+    final version = json['schemaVersion'] as int? ?? 1;
+    if (version != 1 && version != 2) {
+      throw const FormatException('Unsupported game save version');
+    }
+    const players = ['black', 'white'];
+    final count = json['noCapturePlyCount'] as int? ?? 0;
+    final remaining = json['turnRemainingMilliseconds'] as int? ?? 60000;
+    if (!players.contains(json['currentPlayer']) ||
+        !players.contains(json['startingPlayer'] ?? 'black') ||
+        (json['humanPlayer'] != null &&
+            !players.contains(json['humanPlayer'])) ||
+        !const ['pvp', 'pve', 'online'].contains(json['mode']) ||
+        (json['aiDifficulty'] != null &&
+            !const ['easy', 'medium', 'hard'].contains(json['aiDifficulty'])) ||
+        count < 0 ||
+        count > 50 ||
+        remaining < 0 ||
+        remaining > 60000) {
+      throw const FormatException('Invalid game save state');
+    }
     return GameSave(
-      schemaVersion: json['schemaVersion'] as int? ?? 1,
+      schemaVersion: version,
       id: json['id'] as String,
       saveTime: DateTime.parse(json['saveTime'] as String),
       matchId: json['matchId'] as String?,
@@ -132,7 +152,19 @@ class BoardStateData extends Equatable {
       };
 
   factory BoardStateData.fromJson(Map<String, dynamic> json) {
-    return BoardStateData(
+    final grid = json['grid'] as List;
+    if (grid.length != 4 ||
+        grid.any((row) => row is! List || row.length != 4)) {
+      throw const FormatException(
+        'Game save board must have four rows and columns',
+      );
+    }
+    if (grid
+        .expand((row) => row as List)
+        .any((cell) => !const ['black', 'white', 'empty'].contains(cell))) {
+      throw const FormatException('Unknown game save board piece');
+    }
+    final data = BoardStateData(
       grid: (json['grid'] as List)
           .map((row) => (row as List).map((cell) => cell as String).toList())
           .toList(),
@@ -143,6 +175,29 @@ class BoardStateData extends Equatable {
           .map((p) => PositionData.fromJson(Map<String, dynamic>.from(p)))
           .toList(),
     );
+    final occupied = <String>{};
+    for (final pieces in [
+      (data.blackPieces, 'black'),
+      (data.whitePieces, 'white'),
+    ]) {
+      if (pieces.$1.length > 4) {
+        throw const FormatException('Too many saved pieces');
+      }
+      for (final position in pieces.$1) {
+        if (data.grid[position.y][position.x] != pieces.$2 ||
+            !occupied.add('${position.x},${position.y}')) {
+          throw const FormatException('Saved piece list does not match board');
+        }
+      }
+    }
+    if (occupied.length !=
+        data.grid
+            .expand((row) => row)
+            .where((cell) => cell != 'empty')
+            .length) {
+      throw const FormatException('Saved piece list is incomplete');
+    }
+    return data;
   }
 
   factory BoardStateData.fromBoardState(BoardState state) {
@@ -210,9 +265,14 @@ class PositionData extends Equatable {
       };
 
   factory PositionData.fromJson(Map<String, dynamic> json) {
+    final x = json['x'] as int;
+    final y = json['y'] as int;
+    if (x < 0 || x > 3 || y < 0 || y > 3) {
+      throw const FormatException('Saved position is outside the board');
+    }
     return PositionData(
-      x: json['x'] as int,
-      y: json['y'] as int,
+      x: x,
+      y: y,
     );
   }
 

@@ -286,6 +286,28 @@ void main() {
   });
 
   group('MinimaxAI 战术能力', () {
+    test('困难难度优先选择更短的强制获胜路线', () async {
+      var board = createEmptyBoard(currentPlayer: PieceType.black);
+      for (final position in const [
+        Position(3, 0),
+        Position(2, 3),
+        Position(1, 3),
+        Position(1, 0),
+      ]) {
+        board = board.setPiece(position, PieceType.black);
+      }
+      for (final position in const [Position(3, 3), Position(2, 1)]) {
+        board = board.setPiece(position, PieceType.white);
+      }
+      final move = (await MinimaxAI(AIDifficulty.hard).selectMove(board))!;
+      final next = GameEngine().simulateMove(board, move.from, move.to)!;
+      expect(
+        _canForceWin(next, PieceType.black, 2),
+        isTrue,
+        reason: 'Choose a win within three plies, rather than delaying to five',
+      );
+    });
+
     test('中等难度应该执行立即获胜的吃子移动', () async {
       final ai = MinimaxAI(AIDifficulty.medium);
       final board = createEmptyBoard(currentPlayer: PieceType.white)

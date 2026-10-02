@@ -351,9 +351,9 @@ class MinimaxAI extends AIPlayer {
         _engine.checkGameOver(board, noCapturePlyCount: noCapturePlyCount);
     if (gameResult != null) {
       final score = gameResult.winner == aiPlayer
-          ? 10000 // AI获胜
+          ? 10000 + depth // Prefer a faster forced win at this search depth.
           : gameResult.winner == aiPlayer.getOpponent()
-              ? -10000 // AI失败
+              ? -10000 - depth // Delay a forced loss when no safe move exists.
               : 0; // 平局
 
       // 存入置换表

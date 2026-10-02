@@ -11,6 +11,7 @@
 |---------|------|------|------|
 | `verify_release_candidate.ps1` | 使用已有依赖执行工程候选验证并生成证据 | PowerShell | Windows |
 | `run_android_phase1_smoke.ps1` | 在专用 API 34 AVD 上执行会清数据的 Phase 1 冒烟 | PowerShell | Windows |
+| `benchmark_ai.dart` | 可复现的三档 AI 对局样本与搜索诊断 | Dart | 跨平台 |
 | `generate_all_resources.ps1` | 统一资源生成工具（推荐） | PowerShell | Windows |
 | `generate_placeholder_icon.py` | 生成占位图标 | Python | 跨平台 |
 | `generate_placeholder_audio.py` | 生成静音音频 | Python | 跨平台 |
@@ -39,7 +40,15 @@ Android 冒烟会清理专用模拟器中的应用数据，因此保持显式启
 
 入口会继续调用 `run_android_phase1_smoke.ps1` 校验 emulator 和精确 AVD 名称。不得对真实设备或保存有人工测试数据的设备绕过保护直接运行。
 
-### Windows用户（推荐）
+### AI 对局基准
+
+```powershell
+dart run scripts/benchmark_ai.dart 20 20261002
+```
+
+第一参数是每个配对的局数（偶数，2–20，默认 4），第二参数是随机种子（默认 20260921）。配对为中等/简单、困难/简单、困难/中等，轮换先手并交换较强档的执色；每回合创建新 AI，保持与普通 PVE 调用方式一致。逐局 JSON 包含搜索 P95/最大耗时、完成深度分布、重复局面次数和终局原因。计时是当前机器的 Dart 样本，Android 性能需另在真机 Profile/Release 取样；有限对局不构成普遍棋力证明。
+
+### 资源生成（Windows）
 
 ```powershell
 # 生成所有资源（图标+音频）

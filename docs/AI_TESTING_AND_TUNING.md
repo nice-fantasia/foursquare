@@ -1,5 +1,7 @@
 # AI测试和调优总结
 
+> 历史快照：本文保留早期参数和测试结果。分类见 [DOCUMENT_STATUS.md](DOCUMENT_STATUS.md)。当前搜索契约与验收以 [TEST_STRATEGY.md](TEST_STRATEGY.md) 为准；阶段证据见 [2026-09-21 修复报告](reports/tasks/REVIEW_FIXES_20260921.md) 和 [2026-10-02 自动质量批次](reports/tasks/AUTOMATIC_QUALITY_BATCH_20261002.md)。下文数值不代表当前实现。
+
 ## 测试覆盖
 
 ### 创建的测试文件

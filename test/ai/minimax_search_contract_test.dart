@@ -81,7 +81,7 @@ void main() {
         .executeMove(board, move.from, move.to, noCapturePlyCount: 49);
     expect(result.gameResult?.winner, PieceType.white);
     expect(result.noCapturePlyCount, 0);
-    expect(move.score, 10000);
+    expect(move.score, greaterThanOrEqualTo(10000));
   });
   test('evaluation is invariant under rotation and reflection', () {
     final board = boardFromRows('B.BB/.B../WW.W/.W..', PieceType.white);
@@ -130,7 +130,9 @@ int referenceScore(BoardState board, PieceType player, int depth) {
   if (cached != null) return cached;
   final engine = GameEngine();
   final terminal = engine.checkGameOver(board);
-  if (terminal != null) return terminal.winner == player ? 10000 : -10000;
+  if (terminal != null) {
+    return terminal.winner == player ? 10000 + depth : -10000 - depth;
+  }
   if (depth == 0) return BoardEvaluator.evaluate(board, player);
   final scores = <int>[
     for (final entry

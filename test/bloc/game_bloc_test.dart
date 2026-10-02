@@ -108,6 +108,8 @@ void main() {
       when(() => storageService.deleteGameSave()).thenAnswer((_) async => true);
       when(() => storageService.archiveGame(any()))
           .thenAnswer((_) async => true);
+      when(() => storageService.recordCompletedGame(any()))
+          .thenAnswer((_) async => true);
       when(
         () => storageService.updateStatistics(
           isWin: any(named: 'isWin'),
@@ -269,7 +271,7 @@ void main() {
         verify(() => audioCoordinator.onSceneChange(audio.GameScene.gameplay))
             .called(1);
         verify(() => storageService.deleteGameSave()).called(1);
-        verifyNever(() => storageService.archiveGame(any()));
+        verifyNever(() => storageService.recordCompletedGame(any()));
       },
     );
 
@@ -774,19 +776,9 @@ void main() {
             ),
       ],
       verify: (_) {
-        verify(
-          () => storageService.updateStatistics(
-            isWin: true,
-            isLoss: false,
-            isDraw: false,
-            moves: 0,
-            captures: 0,
-            difficulty: null,
-          ),
-        ).called(1);
         verify(() => storageService.deleteGameSave()).called(1);
         final record = verify(
-          () => storageService.archiveGame(captureAny()),
+          () => storageService.recordCompletedGame(captureAny()),
         ).captured.single as GameRecord;
         expect(record.result.status, GameStatus.timeout);
         expect(record.result.winner, PieceType.white);
