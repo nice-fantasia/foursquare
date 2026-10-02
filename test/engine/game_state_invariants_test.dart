@@ -160,8 +160,14 @@ void _expectSamePosition(
   required String reason,
 }) {
   expect(simulated.grid, executed.grid, reason: reason);
-  expect(simulated.blackPieces.toSet(), executed.blackPieces.toSet(),
-      reason: reason);
-  expect(simulated.whitePieces.toSet(), executed.whitePieces.toSet(),
-      reason: reason);
+  expect(
+    simulated.blackPieces.toSet(),
+    executed.blackPieces.toSet(),
+    reason: reason,
+  );
+  expect(
+    simulated.whitePieces.toSet(),
+    executed.whitePieces.toSet(),
+    reason: reason,
+  );
 }

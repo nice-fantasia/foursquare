@@ -23,14 +23,14 @@
 ### 工程候选验证
 
 ```powershell
-# 格式、分析、Flutter 测试、服务端测试与构建、Debug APK
+# 格式、分析、Flutter 测试、服务端测试与构建、Debug APK/AAB、签名材料检查
 .\scripts\verify_release_candidate.ps1
 
 # 正式候选时额外要求 Git 工作树干净
 .\scripts\verify_release_candidate.ps1 -Strict
 ```
 
-脚本只使用本机已有 Flutter、Dart、Node、Android SDK 和已解析依赖，不执行工具或依赖安装。JSON、Markdown 和分步日志写入 `build\verification\<timestamp>\`。默认生成 Debug APK，用于工程回归证据；正式 AAB 仍受永久 applicationId 和签名门禁约束。
+脚本只使用本机已有 Flutter、Dart、Node、Android SDK 和已解析依赖，不执行工具或依赖安装。JSON、Markdown 和分步日志写入 `build\verification\<timestamp>\`。默认生成 Debug APK 和 Debug AAB，并阻止将 `.jks`、`.keystore`、`.p12`、`.pfx`、`.pem`、`.key` 或 `key.properties` 等签名材料纳入 Git；正式 AAB 仍受永久 applicationId 和正式签名门禁约束。
 
 Android 冒烟会清理专用模拟器中的应用数据，因此保持显式启用：
 

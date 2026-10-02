@@ -4,8 +4,9 @@
 
 .DESCRIPTION
     Collects local environment evidence, validates Dart and Flutter sources,
-    runs Flutter and server tests, builds a debug APK, and writes reproducible
-    JSON/Markdown evidence under build\verification.
+    runs Flutter and server tests, checks tracked signing material, builds debug
+    APK/AAB artifacts, and writes reproducible JSON/Markdown evidence under
+    build\verification.
 
     The script never installs tools or packages. The destructive Android smoke
     test remains opt-in and retains the dedicated-AVD guard implemented by
@@ -80,6 +81,71 @@ function Add-LoopbackNoProxy {
         }
     }
     return $values -join ','
+}
+
+function Invoke-TrackedSensitiveFileCheck {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepositoryRoot
+    )
+
+    $name = 'tracked-sensitive-files'
+    $logPath = Join-Path $script:reportDirectory "$name.log"
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    $trackedFiles = @(& git -C $RepositoryRoot ls-files)
+    $gitExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
+    $blockedSuffixes = @(
+        '.jks',
+        '.keystore',
+        '.p12',
+        '.pfx',
+        '.pem',
+        '.key'
+    )
+    $blockedNames = @('key.properties')
+    $matches = @(
+        $trackedFiles | Where-Object {
+            $normalized = $_.Replace('\', '/').ToLowerInvariant()
+            $fileName = [System.IO.Path]::GetFileName($normalized)
+            $blockedNames -contains $fileName -or
+                @($blockedSuffixes | Where-Object {
+                    $normalized.EndsWith($_, [StringComparison]::OrdinalIgnoreCase)
+                }).Count -gt 0
+        }
+    )
+    $timer.Stop()
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    if ($gitExitCode -ne 0) {
+        [void]$lines.Add('git ls-files failed.')
+    } elseif ($matches.Count -gt 0) {
+        [void]$lines.Add('Tracked signing or private-key material:')
+        foreach ($match in $matches) {
+            [void]$lines.Add($match)
+        }
+    } else {
+        [void]$lines.Add('No tracked signing or private-key material found.')
+    }
+    [System.IO.File]::WriteAllLines(
+        $logPath,
+        $lines,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+
+    $success = $gitExitCode -eq 0 -and $matches.Count -eq 0
+    $result = [pscustomobject][ordered]@{
+        name = $name
+        command = 'git ls-files + signing-material filename policy'
+        required = $true
+        success = $success
+        exitCode = if ($success) { 0 } else { 1 }
+        durationMilliseconds = $timer.ElapsedMilliseconds
+        logPath = $logPath
+        testCounts = $null
+        artifact = $null
+    }
+    [void]$script:steps.Add($result)
+    return $result
 }
 
 function Invoke-RecordedCommand {
@@ -247,6 +313,7 @@ $summaryWritten = $false
 $summaryJsonPath = Join-Path $reportDirectory 'summary.json'
 $summaryMarkdownPath = Join-Path $reportDirectory 'summary.md'
 $artifactEvidence = $null
+$bundleEvidence = $null
 $flutterCounts = $null
 $serverCounts = $null
 
@@ -298,6 +365,9 @@ try {
         -Arguments @('doctor', '-v') `
         -WorkingDirectory $repositoryRoot `
         -Required $false
+
+    $trackedSensitiveFiles = Invoke-TrackedSensitiveFileCheck `
+        -RepositoryRoot $repositoryRoot
 
     $sdkRoot = $env:ANDROID_HOME
     $avdNames = @()
@@ -383,6 +453,27 @@ try {
         $apkBuildResult.exitCode = 1
     }
 
+    $aabBuildResult = Invoke-RecordedCommand `
+        -Name 'android-debug-aab' `
+        -Command 'flutter' `
+        -Arguments @('build', 'appbundle', '--debug', '--no-pub') `
+        -WorkingDirectory $repositoryRoot
+
+    $aabPath = Join-Path $repositoryRoot 'build\app\outputs\bundle\debug\app-debug.aab'
+    if ($aabBuildResult.success -and (Test-Path -LiteralPath $aabPath)) {
+        $aabFile = Get-Item -LiteralPath $aabPath
+        $aabHash = Get-FileHash -LiteralPath $aabPath -Algorithm SHA256
+        $bundleEvidence = [pscustomobject][ordered]@{
+            path = $aabFile.FullName
+            sizeBytes = $aabFile.Length
+            sha256 = $aabHash.Hash
+        }
+        $aabBuildResult.artifact = $bundleEvidence
+    } elseif ($aabBuildResult.success) {
+        $aabBuildResult.success = $false
+        $aabBuildResult.exitCode = 1
+    }
+
     if ($IncludeAndroidSmoke) {
         $smokeResult = Invoke-RecordedCommand `
             -Name 'android-api34-smoke' `
@@ -431,6 +522,10 @@ try {
             server = $serverCounts
         }
         artifact = $artifactEvidence
+        artifacts = [ordered]@{
+            apk = $artifactEvidence
+            aab = $bundleEvidence
+        }
         strictFailures = $strictFailures
         steps = $steps
     }
@@ -470,11 +565,16 @@ try {
     )
     if ($null -ne $artifactEvidence) {
         [void]$markdown.Add('')
-        [void]$markdown.Add('## Debug APK')
+        [void]$markdown.Add('## Debug artifacts')
         [void]$markdown.Add('')
-        [void]$markdown.Add("- Path: ``$($artifactEvidence.path)``")
-        [void]$markdown.Add("- Size: $($artifactEvidence.sizeBytes) bytes")
-        [void]$markdown.Add("- SHA-256: ``$($artifactEvidence.sha256)``")
+        [void]$markdown.Add("- APK path: ``$($artifactEvidence.path)``")
+        [void]$markdown.Add("- APK size: $($artifactEvidence.sizeBytes) bytes")
+        [void]$markdown.Add("- APK SHA-256: ``$($artifactEvidence.sha256)``")
+    }
+    if ($null -ne $bundleEvidence) {
+        [void]$markdown.Add("- AAB path: ``$($bundleEvidence.path)``")
+        [void]$markdown.Add("- AAB size: $($bundleEvidence.sizeBytes) bytes")
+        [void]$markdown.Add("- AAB SHA-256: ``$($bundleEvidence.sha256)``")
     }
     [System.IO.File]::WriteAllLines(
         $summaryMarkdownPath,

@@ -138,7 +138,7 @@ Windows 本机基础验证入口：
 .\scripts\verify_release_candidate.ps1
 ```
 
-该入口只使用已经安装的工具和已经解析的依赖，不执行环境或依赖安装。默认顺序执行 Dart 格式检查、Flutter analyze、普通 Flutter 单元/Widget 测试、服务端 `npm test`（其自身已包含 TypeScript/Prisma build）以及 Debug APK 构建，并将版本、commit、工作树、耗时、测试数量、APK 大小和 SHA-256 写入 `build\verification\<timestamp>\`。Debug APK 证据不替代正式签名 AAB 和商店门禁。
+该入口只使用已经安装的工具和已经解析的依赖，不执行环境或依赖安装。默认顺序执行签名材料文件名检查、Dart 格式检查、Flutter analyze、普通 Flutter 单元/Widget 测试、服务端 `npm test`（其自身已包含 TypeScript/Prisma build）以及 Debug APK、Debug AAB 构建，并将版本、commit、工作树、耗时、测试数量、两个产物的大小和 SHA-256 写入 `build\verification\<timestamp>\`。签名材料检查阻止常见私钥/证书文件进入 Git，但不读取环境文件内容；Debug 产物证据不替代正式签名 AAB 和商店门禁。
 
 专用 Android smoke 对简单、中等、困难分别完成玩家落子与 AI 响应，校验执色、历史、棋盘、未吃计数、存档及继续游戏。它输出 `FOURSQUARE_FRAME_TIMING=` JSON（Flutter build/raster 时间及构建模式），供原始证据归档。功能 smoke 关闭动画，其 Debug 数据不用于正式性能判定；正式性能需真机 Profile/Release 的连续走棋、困难 AI 思考、动画和页面滚动样本。Android `gfxinfo` 可能只包含原生窗口的部分渲染，不单独作为 Flutter 卡顿率门禁。
 
