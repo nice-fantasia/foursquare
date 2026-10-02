@@ -129,6 +129,140 @@ test('two real Socket.IO clients match, move, disconnect and resume', async (t) 
     assert.deepEqual(refreshed.state.board, commitForFirst.state.board);
 });
 
+test('six real matches stay isolated through moves and concurrent resumes', async (t) => {
+    const httpServer = createServer();
+    const ioServer = new Server(httpServer, {
+        cors: { origin: '*' },
+    });
+    let matchSequence = 0;
+    const manager = new RoomManager({
+        random: () => 0,
+        id: () => `match-stress-${++matchSequence}`,
+        schedule: (callback, delayMs) => {
+            const timer = setTimeout(callback, delayMs);
+            timer.unref();
+            return timer;
+        },
+        cancelSchedule: (handle) => clearTimeout(handle as NodeJS.Timeout),
+    });
+    createSocketGateway(
+        ioServer as unknown as Parameters<typeof createSocketGateway>[0],
+        manager,
+        async () => 'enqueued' as const,
+    );
+    await new Promise<void>((resolve) => httpServer.listen(0, resolve));
+    const address = httpServer.address() as AddressInfo;
+    const serverUrl = `http://127.0.0.1:${address.port}`;
+    const clients: Socket[] = [];
+
+    t.after(async () => {
+        for (const client of clients) client.disconnect();
+        await new Promise<void>((resolve) => ioServer.close(() => resolve()));
+    });
+
+    const initialClients = await Promise.all(
+        Array.from({ length: 12 }, () => connectClient(serverUrl)),
+    );
+    clients.push(...initialClients);
+    const matches: Array<{
+        first: Socket;
+        second: Socket;
+        firstPlayerId: string;
+        firstSnapshot: WirePayload;
+        secondSnapshot: WirePayload;
+    }> = [];
+
+    for (let pair = 0; pair < 6; pair += 1) {
+        const first = initialClients[pair * 2];
+        const second = initialClients[pair * 2 + 1];
+        const firstPlayerId = `stress-player-${pair}-a`;
+        const firstMatched = onceEvent(first, 'match_found');
+        const secondMatched = onceEvent(second, 'match_found');
+        first.emit('request_match', {
+            protocolVersion: 1,
+            playerId: firstPlayerId,
+        });
+        second.emit('request_match', {
+            protocolVersion: 1,
+            playerId: `stress-player-${pair}-b`,
+        });
+        const [firstSnapshot, secondSnapshot] = await Promise.all([
+            firstMatched,
+            secondMatched,
+        ]);
+        assert.equal(firstSnapshot.matchId, secondSnapshot.matchId);
+        matches.push({
+            first,
+            second,
+            firstPlayerId,
+            firstSnapshot,
+            secondSnapshot,
+        });
+    }
+
+    assert.equal(
+        new Set(matches.map((match) => match.firstSnapshot.matchId)).size,
+        matches.length,
+    );
+
+    await Promise.all(matches.map(async (match, index) => {
+        const currentColor = match.firstSnapshot.state.currentTurn as string;
+        const mover = match.firstSnapshot.color === currentColor
+            ? match.first
+            : match.second;
+        const fromY = currentColor === 'black' ? 0 : 3;
+        const toY = currentColor === 'black' ? 1 : 2;
+        const firstCommit = onceEvent(match.first, 'move_committed');
+        const secondCommit = onceEvent(match.second, 'move_committed');
+        mover.emit('submit_move', {
+            protocolVersion: 1,
+            matchId: match.firstSnapshot.matchId,
+            commandId: `stress-command-${index}`,
+            expectedRevision: 0,
+            from: { x: 0, y: fromY },
+            to: { x: 0, y: toY },
+        });
+        const [commitForFirst, commitForSecond] = await Promise.all([
+            firstCommit,
+            secondCommit,
+        ]);
+        assert.equal(commitForFirst.state.revision, 1);
+        assert.deepEqual(commitForSecond.state, commitForFirst.state);
+    }));
+
+    await Promise.all(matches.map(async (match) => {
+        const opponentDisconnected = onceEvent(
+            match.second,
+            'opponent_disconnected',
+        );
+        match.first.disconnect();
+        const disconnected = await opponentDisconnected;
+        assert.equal(disconnected.matchId, match.firstSnapshot.matchId);
+    }));
+
+    await Promise.all(matches.map(async (match) => {
+        const returned = await connectClient(serverUrl);
+        clients.push(returned);
+        const resumedSnapshot = onceEvent(returned, 'authoritative_snapshot');
+        const opponentReconnected = onceEvent(
+            match.second,
+            'opponent_reconnected',
+        );
+        returned.emit('resume_match', {
+            protocolVersion: 1,
+            playerId: match.firstPlayerId,
+            matchId: match.firstSnapshot.matchId,
+        });
+        const [resumed, reconnected] = await Promise.all([
+            resumedSnapshot,
+            opponentReconnected,
+        ]);
+        assert.equal(resumed.matchId, match.firstSnapshot.matchId);
+        assert.equal(resumed.state.revision, 1);
+        assert.equal(reconnected.matchId, match.firstSnapshot.matchId);
+    }));
+});
+
 const connectClient = (serverUrl: string): Promise<Socket> =>
     new Promise((resolve, reject) => {
         const socket = createClient(serverUrl, {
