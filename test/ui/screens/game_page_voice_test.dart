@@ -12,6 +12,8 @@ import 'package:foursquare/models/board_state.dart';
 import 'package:foursquare/models/game_result.dart';
 import 'package:foursquare/models/piece_type.dart';
 import 'package:foursquare/models/position.dart';
+import 'package:foursquare/engine/game_engine.dart';
+import 'package:foursquare/ui/widgets/themed_board_widget.dart';
 import 'package:foursquare/services/voice/game_voice_session.dart';
 import 'package:foursquare/ui/screens/game_page.dart';
 import 'package:mocktail/mocktail.dart';
@@ -29,6 +31,65 @@ void main() {
   setUp(() {
     bloc = _MockGameBloc();
     when(() => bloc.add(any())).thenReturn(null);
+  });
+
+  testWidgets(
+      'winning capture finishes before a non-modal result below the board',
+      (tester) async {
+    _usePortraitViewport(tester);
+    var board = BoardState.initial(currentPlayer: PieceType.white);
+    for (var y = 0; y < 4; y++) {
+      for (var x = 0; x < 4; x++) {
+        board = board.setPiece(Position(x, y), PieceType.empty);
+      }
+    }
+    for (final p in [
+      const Position(0, 0),
+      const Position(1, 1),
+      const Position(0, 3),
+    ]) {
+      board = board.setPiece(p, PieceType.white);
+    }
+    for (final p in [const Position(2, 0), const Position(3, 3)]) {
+      board = board.setPiece(p, PieceType.black);
+    }
+    final playing = GamePlaying(
+      boardState: board,
+      mode: GameMode.pve,
+      humanPlayer: PieceType.black,
+      firstPlayer: PieceType.white,
+      matchId: 'win',
+    );
+    final result = GameEngine()
+        .executeMove(board, const Position(1, 1), const Position(1, 0));
+    expect(result.gameOver, isTrue);
+    final terminal = GameOver.fromPlaying(
+      playing.copyWith(
+        boardState: result.newBoard,
+        lastMove: result.move,
+        moveHistory: [result.move!],
+      ),
+      result.gameResult!,
+    );
+    final states = StreamController<GameState>();
+    whenListen(bloc, states.stream, initialState: playing);
+    await tester.pumpWidget(_app(bloc: bloc, child: const GamePageView()));
+    await tester.pump();
+    states.add(terminal);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.byType(Dialog), findsNothing);
+    expect(find.byKey(const Key('game-result-summary')), findsNothing);
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.pump();
+    final summary = find.byKey(const Key('game-result-summary'));
+    expect(summary, findsOneWidget);
+    final boardRect = tester.getRect(find.byType(ThemedBoardWidget));
+    expect(tester.getRect(summary).overlaps(boardRect), isFalse);
+    expect(find.text('Jade wins!'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    await states.close();
   });
 
   for (final human in [PieceType.black, PieceType.white]) {
@@ -72,6 +133,47 @@ void main() {
         semantics.dispose();
       });
     }
+  }
+
+  for (final viewport in [const Size(320, 568), const Size(800, 360)]) {
+    testWidgets('terminal board and actions fit $viewport without an overlay',
+        (tester) async {
+      tester.view.physicalSize = viewport;
+      tester.view.devicePixelRatio = 1;
+      tester.platformDispatcher.textScaleFactorTestValue =
+          viewport.width == 320 ? 2 : 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      final playing = GamePlaying(
+        boardState: BoardState.initial(),
+        mode: GameMode.pvp,
+        firstPlayer: PieceType.white,
+        matchId: 'timeout',
+      );
+      final terminal = GameOver.fromPlaying(
+        playing,
+        GameResult.timeout(
+          timeoutPlayer: PieceType.black,
+          moveCount: 0,
+          duration: const Duration(seconds: 60),
+        ),
+      );
+      _stubState(bloc, terminal);
+      await tester.pumpWidget(_app(bloc: bloc, child: const GamePageView()));
+      await tester.pump();
+      final summary = find.byKey(const Key('game-result-summary'));
+      final board = find.byType(ThemedBoardWidget);
+      expect(summary, findsOneWidget);
+      expect(find.byType(Dialog), findsNothing);
+      expect(tester.getRect(summary).overlaps(tester.getRect(board)), isFalse);
+      expect(tester.widget<ThemedBoardWidget>(board).flipBoard, isTrue);
+      await tester.ensureVisible(find.text('Play again'));
+      await tester.tap(find.text('Play again'));
+      verify(() => bloc.add(const RestartGameEvent())).called(1);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    });
   }
 
   test('production voice constructor is side-effect free', () {

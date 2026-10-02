@@ -6,6 +6,7 @@
 
 ### 执行报告
 
+- [GAMEPLAY_FEEDBACK_20261003.md](./tasks/GAMEPLAY_FEEDBACK_20261003.md) - 终局棋盘可见性、吃子展示顺序与独立触觉反馈
 - [AUTOMATIC_READINESS_NEXT_20261002.md](./tasks/AUTOMATIC_READINESS_NEXT_20261002.md) - Android 环境、规则与 AI、UI、打包、Online 及候选检查
 - [MULTI_BATCH_HARDENING_20261002.md](./tasks/MULTI_BATCH_HARDENING_20261002.md) - 当前自动队列的多批加固、验证与剩余门禁
 - [RESUME_AI_REFINEMENT_20261002.md](./tasks/RESUME_AI_REFINEMENT_20261002.md) - 续局标记恢复、困难 AI 与后续计划

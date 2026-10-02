@@ -115,6 +115,8 @@ class _GamePageViewState extends State<GamePageView>
   bool _voiceBusy = false;
   bool _voiceSetupFailed = false;
   bool _appIsActive = true;
+  String? _completedBoardMatchId;
+  int? _completedBoardMove;
 
   @override
   void initState() {
@@ -198,10 +200,6 @@ class _GamePageViewState extends State<GamePageView>
           BlocConsumer<GameBloc, GameState>(
             listener: (context, state) {
               _onGameStateChanged(state);
-              // 监听游戏结束状态
-              if (state is GameOver) {
-                _showGameOverDialog(context, state);
-              }
             },
             builder: (context, state) {
               if (state is GameInitial || state is GameLoading) {
@@ -342,6 +340,23 @@ class _GamePageViewState extends State<GamePageView>
     // 双人对战按真实先手翻转；人机对战按真实玩家执色翻转。
     // 信息面板复用同一结果，保证移动历史坐标与用户看到的棋盘一致。
     return ThemedBoardWidget(
+      presentationId: state.matchId,
+      moveNumber: state.moveHistory.length,
+      interactive: state is GamePlaying,
+      onPresentationComplete: (moveNumber) {
+        if (!mounted ||
+            context.read<GameBloc>().state.matchId != state.matchId) {
+          return;
+        }
+        if (_completedBoardMatchId == state.matchId &&
+            _completedBoardMove == moveNumber) {
+          return;
+        }
+        setState(() {
+          _completedBoardMatchId = state.matchId;
+          _completedBoardMove = moveNumber;
+        });
+      },
       boardState: state.boardState,
       selectedPiece: state.selectedPiece,
       validMoves: state.validMoves,
@@ -354,6 +369,32 @@ class _GamePageViewState extends State<GamePageView>
   }
 
   Widget _buildInfoPanel(BuildContext context, GameState state) {
+    if (state is GameOver) {
+      if (_completedBoardMatchId != state.matchId ||
+          _completedBoardMove != state.moveHistory.length) {
+        return const SizedBox.shrink();
+      }
+      final l10n = AppLocalizations.of(context)!;
+      return GameResultSummary(
+        key: const Key('game-result-summary'),
+        gameResult: state.gameResult!,
+        onRestart: () => context.read<GameBloc>().add(const RestartGameEvent()),
+        onExit: () => Navigator.of(context).pop(),
+        onReplay: state.moveHistory.isEmpty
+            ? null
+            : () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => GameReplayPage(
+                      moveHistory: state.moveHistory,
+                      startingPlayer: state.firstPlayer ?? PieceType.black,
+                      gameTitle: state.mode == GameMode.pvp
+                          ? l10n.pvpReplayTitle
+                          : l10n.pveReplayTitle,
+                    ),
+                  ),
+                ),
+      );
+    }
     final isAIThinking = state is GamePlaying && state.isAIThinking;
     final aiProgress = state is GamePlaying ? state.aiThinkingProgress : 0.0;
     final aiStatus = state is GamePlaying ? state.aiThinkingStatus : '';
@@ -393,7 +434,7 @@ class _GamePageViewState extends State<GamePageView>
   }
 
   bool _shouldFlipBoard(GameState state) {
-    if (state.mode == GameMode.pvp && state is GamePlaying) {
+    if (state.mode == GameMode.pvp) {
       return state.firstPlayer == PieceType.white;
     }
     if (state.mode == GameMode.pve) {
@@ -648,41 +689,6 @@ class _GamePageViewState extends State<GamePageView>
     Position position,
   ) {
     context.read<GameBloc>().add(ActivateBoardPositionEvent(position));
-  }
-
-  void _showGameOverDialog(BuildContext context, GameOver state) {
-    final l10n = AppLocalizations.of(context)!;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      showGameOverDialog(
-        context,
-        winner: state.winner,
-        gameResult: state.gameResult!,
-        onRestart: () {
-          Navigator.of(context).pop();
-          context.read<GameBloc>().add(const RestartGameEvent());
-        },
-        onExit: () {
-          Navigator.of(context).pop();
-          Navigator.of(context).pop();
-        },
-        onReplay: state.moveHistory.isNotEmpty
-            ? () {
-                Navigator.of(context).pop();
-                Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (context) => GameReplayPage(
-                      moveHistory: state.moveHistory,
-                      startingPlayer: state.firstPlayer ?? PieceType.black,
-                      gameTitle: state.mode == GameMode.pvp
-                          ? l10n.pvpReplayTitle
-                          : l10n.pveReplayTitle,
-                    ),
-                  ),
-                );
-              }
-            : null,
-      );
-    });
   }
 
   void _showRestartConfirmation(BuildContext context) {

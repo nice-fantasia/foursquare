@@ -35,7 +35,8 @@ void main() {
     final pack = modernEasternThemePack;
     final reduced = pack.motion.resolve(reduceMotion: true);
 
-    expect(pack.motion.moveDuration, const Duration(milliseconds: 180));
+    expect(pack.motion.moveDuration, const Duration(milliseconds: 320));
+    expect(pack.motion.captureDuration, const Duration(milliseconds: 680));
     expect(reduced.pageTransitionDuration, Duration.zero);
     expect(reduced.moveDuration, Duration.zero);
     expect(reduced.captureDuration, Duration.zero);

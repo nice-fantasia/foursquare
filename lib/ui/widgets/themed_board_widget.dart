@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:collection';
 import 'package:flutter/material.dart';
 
 import '../../constants/ui_constants.dart';
@@ -23,6 +25,10 @@ class ThemedBoardWidget extends StatefulWidget {
     this.size,
     this.flipBoard = false,
     this.themePack,
+    this.moveNumber,
+    this.presentationId,
+    this.onPresentationComplete,
+    this.interactive = true,
   });
 
   final BoardState boardState;
@@ -38,6 +44,10 @@ class ThemedBoardWidget extends StatefulWidget {
   /// Optional injection seam used by previews, tests and future theme packs.
   /// The phase-one registry supplies modern eastern when omitted.
   final ThemePack? themePack;
+  final int? moveNumber;
+  final Object? presentationId;
+  final ValueChanged<int?>? onPresentationComplete;
+  final bool interactive;
 
   @override
   State<ThemedBoardWidget> createState() => _ThemedBoardWidgetState();
@@ -49,13 +59,112 @@ class _ThemedBoardWidgetState extends State<ThemedBoardWidget> {
   bool _animationEnabled = true;
   bool _particleEnabled = true;
   bool _vibrationEnabled = true;
+  late ThemedBoardWidget _presented;
+  final Queue<ThemedBoardWidget> _pending = Queue();
+  Timer? _settleTimer;
+  bool _presenting = false;
+  bool _systemReduceMotion = false;
+  bool _feedbackEnabled = true;
+  int _presentationGeneration = 0;
 
   ThemePack get _themePack => widget.themePack ?? _themeRegistry.defaultPack;
 
   @override
   void initState() {
     super.initState();
+    _presented = widget;
+    _notifyComplete();
     _loadSettings();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final reduced = MediaQuery.maybeOf(context)?.disableAnimations ?? false;
+    if (reduced != _systemReduceMotion) {
+      _systemReduceMotion = reduced;
+      if (reduced) _resetPresentation();
+    }
+  }
+
+  @override
+  void didUpdateWidget(ThemedBoardWidget oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final forward = widget.presentationId == oldWidget.presentationId &&
+        widget.moveNumber != null &&
+        oldWidget.moveNumber != null &&
+        widget.moveNumber == oldWidget.moveNumber! + 1;
+    if (forward &&
+        _animationEnabled &&
+        !_systemReduceMotion &&
+        _themePack.motion.moveDuration > Duration.zero) {
+      if (_presenting) {
+        _pending.add(widget);
+      } else {
+        _startPresentation(widget);
+      }
+    } else if (widget.presentationId != oldWidget.presentationId ||
+        widget.moveNumber != oldWidget.moveNumber ||
+        (widget.boardState != oldWidget.boardState && !forward)) {
+      _resetPresentation(feedbackEnabled: forward || widget.moveNumber == null);
+    } else if (_presented.moveNumber == widget.moveNumber) {
+      _presented = widget;
+      _feedbackEnabled = true;
+      if (!_presenting) _notifyComplete();
+    }
+  }
+
+  void _startPresentation(ThemedBoardWidget frame) {
+    _presentationGeneration++;
+    _presented = frame;
+    _feedbackEnabled = true;
+    _presenting = true;
+  }
+
+  void _onMoveCompleted(ThemedBoardWidget frame) {
+    if (!_presenting || !identical(frame, _presented) || _settleTimer != null) {
+      return;
+    }
+    _settleTimer = Timer(_themePack.motion.stateChangeDuration, () {
+      if (!mounted) return;
+      _settleTimer = null;
+      setState(() {
+        _presenting = false;
+        if (_pending.isNotEmpty) {
+          _startPresentation(_pending.removeFirst());
+        } else {
+          _presented = widget;
+          _notifyComplete();
+        }
+      });
+    });
+  }
+
+  void _resetPresentation({bool feedbackEnabled = false}) {
+    _presentationGeneration++;
+    _settleTimer?.cancel();
+    _settleTimer = null;
+    _pending.clear();
+    _presenting = false;
+    _presented = widget;
+    _feedbackEnabled = feedbackEnabled;
+    _notifyComplete();
+  }
+
+  void _notifyComplete() {
+    final generation = _presentationGeneration;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && !_presenting && generation == _presentationGeneration) {
+        widget.onPresentationComplete?.call(_presented.moveNumber);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _settleTimer?.cancel();
+    _pending.clear();
+    super.dispose();
   }
 
   Future<void> _loadSettings() async {
@@ -65,6 +174,7 @@ class _ThemedBoardWidgetState extends State<ThemedBoardWidget> {
       _animationEnabled = settings.animationEnabled;
       _particleEnabled = settings.particleEnabled;
       _vibrationEnabled = settings.vibrationEnabled;
+      if (!_animationEnabled) _resetPresentation();
     });
   }
 
@@ -77,43 +187,55 @@ class _ThemedBoardWidgetState extends State<ThemedBoardWidget> {
       reduceMotion: reduceMotion,
     );
     final boardSize = widget.size ?? _calculateBoardSize(context);
+    final frame = _presented;
 
-    return SizedBox.square(
-      dimension: boardSize,
-      child: Stack(
-        children: [
-          Positioned.fill(
-            child: ExcludeSemantics(
-              child: AnimatedBoardWidget(
-                boardState: widget.boardState,
-                selectedPiece: widget.selectedPiece,
-                validMoves: widget.validMoves,
-                lastMoveFrom: widget.lastMoveFrom,
-                lastMoveTo: widget.lastMoveTo,
-                capturedPiecePositions: widget.capturedPiecePositions,
-                onPositionTapped: widget.onPositionTapped,
-                size: boardSize,
-                vibrationEnabled: _vibrationEnabled,
-                animationEnabled: effectiveMotion.moveDuration != Duration.zero,
-                particleEnabled:
-                    _particleEnabled && effectiveMotion.particlesEnabled,
-                flipBoard: widget.flipBoard,
-                theme: ThemePackBoardThemeAdapter(_themePack),
+    return IgnorePointer(
+      ignoring: _presenting || !widget.interactive,
+      child: SizedBox.square(
+        dimension: boardSize,
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: ExcludeSemantics(
+                child: AnimatedBoardWidget(
+                  key: ValueKey(widget.presentationId),
+                  boardState: frame.boardState,
+                  selectedPiece: frame.selectedPiece,
+                  validMoves: frame.validMoves,
+                  lastMoveFrom: frame.lastMoveFrom,
+                  lastMoveTo: frame.lastMoveTo,
+                  capturedPiecePositions: frame.capturedPiecePositions,
+                  feedbackEnabled: _feedbackEnabled,
+                  onMoveCompleted: () => _onMoveCompleted(frame),
+                  onPositionTapped: widget.onPositionTapped,
+                  size: boardSize,
+                  vibrationEnabled: _vibrationEnabled,
+                  animationEnabled:
+                      effectiveMotion.moveDuration != Duration.zero,
+                  moveDuration: effectiveMotion.moveDuration,
+                  captureDuration: effectiveMotion.captureDuration,
+                  moveCurve: effectiveMotion.moveCurve,
+                  captureCurve: effectiveMotion.captureCurve,
+                  particleEnabled:
+                      _particleEnabled && effectiveMotion.particlesEnabled,
+                  flipBoard: frame.flipBoard,
+                  theme: ThemePackBoardThemeAdapter(_themePack),
+                ),
               ),
             ),
-          ),
-          Positioned.fill(
-            child: BoardSemanticsOverlay(
-              boardState: widget.boardState,
-              selectedPiece: widget.selectedPiece,
-              validMoves: widget.validMoves,
-              lastMoveFrom: widget.lastMoveFrom,
-              lastMoveTo: widget.lastMoveTo,
-              flipBoard: widget.flipBoard,
-              onPositionTapped: widget.onPositionTapped,
+            Positioned.fill(
+              child: BoardSemanticsOverlay(
+                boardState: frame.boardState,
+                selectedPiece: frame.selectedPiece,
+                validMoves: frame.validMoves,
+                lastMoveFrom: frame.lastMoveFrom,
+                lastMoveTo: frame.lastMoveTo,
+                flipBoard: frame.flipBoard,
+                onPositionTapped: widget.onPositionTapped,
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

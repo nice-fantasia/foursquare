@@ -59,7 +59,7 @@ class GameOverDialog extends StatelessWidget {
 
             // 结果标题
             Text(
-              _getResultTitle(l10n),
+              _getResultTitle(l10n, winner, gameResult),
               style: const TextStyle(
                 fontSize: 28,
                 fontWeight: FontWeight.bold,
@@ -70,7 +70,7 @@ class GameOverDialog extends StatelessWidget {
 
             // 结果详情
             Text(
-              _getResultReason(l10n),
+              _getResultReason(l10n, winner, gameResult),
               textAlign: TextAlign.center,
               style: const TextStyle(
                 fontSize: 16,
@@ -153,7 +153,11 @@ class GameOverDialog extends StatelessWidget {
   }
 
   /// 获取结果标题
-  String _getResultTitle(AppLocalizations l10n) {
+  static String _getResultTitle(
+    AppLocalizations l10n,
+    PieceType? winner,
+    GameResult gameResult,
+  ) {
     final resolvedWinner = winner ?? gameResult.winner;
     if (resolvedWinner != null) {
       return resolvedWinner == PieceType.black
@@ -172,7 +176,11 @@ class GameOverDialog extends StatelessWidget {
     }
   }
 
-  String _getResultReason(AppLocalizations l10n) {
+  static String _getResultReason(
+    AppLocalizations l10n,
+    PieceType? winner,
+    GameResult gameResult,
+  ) {
     final resolvedWinner = winner ?? gameResult.winner;
     final blackWon = resolvedWinner == PieceType.black;
     switch (gameResult.endReason) {
@@ -199,6 +207,73 @@ class GameOverDialog extends StatelessWidget {
             ? l10n.endReasonAbandonedBlack
             : l10n.endReasonAbandonedWhite;
     }
+  }
+}
+
+/// Compact result that keeps the final board visible in the game layout.
+class GameResultSummary extends StatelessWidget {
+  const GameResultSummary({
+    super.key,
+    required this.gameResult,
+    required this.onRestart,
+    required this.onExit,
+    this.onReplay,
+  });
+
+  final GameResult gameResult;
+  final VoidCallback onRestart;
+  final VoidCallback onExit;
+  final VoidCallback? onReplay;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final theme = Theme.of(context);
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Semantics(
+              liveRegion: true,
+              child: Text(
+                GameOverDialog._getResultTitle(
+                  l10n,
+                  gameResult.winner,
+                  gameResult,
+                ),
+                style: theme.textTheme.titleLarge,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              GameOverDialog._getResultReason(
+                l10n,
+                gameResult.winner,
+                gameResult,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                FilledButton(onPressed: onRestart, child: Text(l10n.playAgain)),
+                if (onReplay != null)
+                  OutlinedButton(
+                    onPressed: onReplay,
+                    child: Text(l10n.viewReplay),
+                  ),
+                TextButton(onPressed: onExit, child: Text(l10n.exit)),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
