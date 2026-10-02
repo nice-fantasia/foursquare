@@ -58,6 +58,8 @@ class AIMoveResult {
   final int score;
   final int nodesEvaluated;
   final Duration thinkingTime;
+  final int completedDepth;
+  final bool timedOut;
 
   const AIMoveResult({
     required this.from,
@@ -65,6 +67,8 @@ class AIMoveResult {
     required this.score,
     this.nodesEvaluated = 0,
     this.thinkingTime = Duration.zero,
+    this.completedDepth = 0,
+    this.timedOut = false,
   });
 
   @override
@@ -81,7 +85,10 @@ abstract class AIPlayer {
   /// 选择最佳移动
   ///
   /// 返回null表示无法移动
-  Future<AIMoveResult?> selectMove(BoardState board);
+  Future<AIMoveResult?> selectMove(
+    BoardState board, {
+    int noCapturePlyCount = 0,
+  });
 
   /// AI名称
   String get name;

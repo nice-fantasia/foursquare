@@ -10,6 +10,9 @@
 /// - 游戏结束检测
 library;
 
+import 'dart:async';
+import 'package:foursquare/ai/ai_player.dart';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:bloc_test/bloc_test.dart';
 import 'package:mocktail/mocktail.dart';
@@ -42,6 +45,30 @@ class MockStorageService extends Mock implements StorageService {}
 class FakeGameSave extends Fake implements GameSave {}
 
 class FakeGameRecord extends Fake implements GameRecord {}
+
+const _blackOpeningMove = AIMoveResult(
+  from: Position(0, 0),
+  to: Position(0, 1),
+  score: 0,
+);
+
+class DeferredAI extends AIPlayer {
+  DeferredAI() : super(AIDifficulty.medium);
+  final started = Completer<void>();
+  final result = Completer<AIMoveResult?>();
+  @override
+  String get name => 'Deferred test AI';
+  @override
+  String get description => name;
+  @override
+  Future<AIMoveResult?> selectMove(
+    BoardState board, {
+    int noCapturePlyCount = 0,
+  }) {
+    started.complete();
+    return result.future;
+  }
+}
 
 void main() {
   // 注册fallback值以支持mocktail的any()匹配器
@@ -104,6 +131,114 @@ void main() {
       expect(bloc.state, isA<GameInitial>());
 
       bloc.close();
+    });
+
+    test('late AI result cannot overwrite a new game', () async {
+      final ai = DeferredAI();
+      final bloc = GameBloc(
+        audioCoordinator: audioCoordinator,
+        storageService: storageService,
+        startingPlayerPicker: () => PieceType.black,
+        humanPlayerPicker: () => PieceType.white,
+        aiFactory: (_) => ai,
+      );
+      bloc.add(const NewGameEvent(mode: GameMode.pve));
+      await ai.started.future;
+      final newGame = bloc.stream.firstWhere((s) => s.mode == GameMode.pvp);
+      bloc.add(const NewGameEvent(mode: GameMode.pvp));
+      await newGame;
+      ai.result.complete(_blackOpeningMove);
+      await pumpEventQueue();
+      expect(bloc.state.mode, GameMode.pvp);
+      expect(bloc.state.moveHistory, isEmpty);
+      expect(bloc.state.isAIThinking, isFalse);
+      await bloc.close();
+    });
+
+    test(
+        'pause invalidates AI result and resume starts exactly one fresh search',
+        () async {
+      final first = DeferredAI();
+      final second = DeferredAI();
+      var calls = 0;
+      var now = DateTime.utc(2026, 9, 21);
+      final bloc = GameBloc(
+        audioCoordinator: audioCoordinator,
+        storageService: storageService,
+        startingPlayerPicker: () => PieceType.black,
+        humanPlayerPicker: () => PieceType.white,
+        now: () => now,
+        aiFactory: (_) => ++calls == 1 ? first : second,
+      );
+      bloc.add(const NewGameEvent(mode: GameMode.pve));
+      await first.started.future;
+      bloc.add(const AIPlayEvent());
+      await pumpEventQueue();
+      expect(calls, 1);
+      now = now.add(const Duration(seconds: 5));
+      final paused =
+          bloc.stream.firstWhere((s) => s.turnClock?.isPaused == true);
+      bloc.add(PauseTurnClockEvent(now));
+      await paused;
+      first.result.complete(_blackOpeningMove);
+      await pumpEventQueue();
+      expect(bloc.state.moveHistory, isEmpty);
+      expect(
+        bloc.state.turnClock!.remainingAt(now),
+        const Duration(seconds: 55),
+      );
+      now = now.add(const Duration(seconds: 30));
+      bloc.add(ResumeTurnClockEvent(now));
+      await second.started.future;
+      final committed =
+          bloc.stream.firstWhere((s) => s.moveHistory.length == 1);
+      second.result.complete(_blackOpeningMove);
+      await committed;
+      expect(calls, 2);
+      expect(bloc.state.currentPlayer, PieceType.white);
+      expect(bloc.state.isAIThinking, isFalse);
+      await bloc.close();
+    });
+
+    test('deadline while AI thinks wins over its late move', () async {
+      final ai = DeferredAI();
+      var now = DateTime.utc(2026, 9, 21);
+      final bloc = GameBloc(
+        audioCoordinator: audioCoordinator,
+        storageService: storageService,
+        startingPlayerPicker: () => PieceType.black,
+        humanPlayerPicker: () => PieceType.white,
+        now: () => now,
+        aiFactory: (_) => ai,
+      );
+      bloc.add(const NewGameEvent(mode: GameMode.pve));
+      await ai.started.future;
+      now = now.add(const Duration(seconds: 60));
+      final ended = bloc.stream.firstWhere((s) => s is GameOver);
+      bloc.add(TurnClockTickEvent(now));
+      await ended;
+      ai.result.complete(_blackOpeningMove);
+      await pumpEventQueue();
+      expect(bloc.state.gameResult?.endReason, GameEndReason.timeout);
+      expect(bloc.state.moveHistory, isEmpty);
+      await bloc.close();
+    });
+
+    test('closing while AI thinks ignores the late result', () async {
+      final ai = DeferredAI();
+      final bloc = GameBloc(
+        audioCoordinator: audioCoordinator,
+        storageService: storageService,
+        startingPlayerPicker: () => PieceType.black,
+        humanPlayerPicker: () => PieceType.white,
+        aiFactory: (_) => ai,
+      );
+      bloc.add(const NewGameEvent(mode: GameMode.pve));
+      await ai.started.future;
+      final closing = bloc.close();
+      ai.result.complete(_blackOpeningMove);
+      await closing;
+      expect(bloc.state.moveHistory, isEmpty);
     });
 
     blocTest<GameBloc, GameState>(

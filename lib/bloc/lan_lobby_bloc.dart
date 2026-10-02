@@ -81,7 +81,13 @@ class LanLobbyBloc extends Bloc<LanLobbyEvent, LanLobbyState> {
   ) async {
     await _servicesSubscription?.cancel();
     await _networkService.stop();
-    // State update will be handled by connection stream
+    emit(
+      state.copyWith(
+        status: LanLobbyStatus.initial,
+        foundServices: const [],
+        clearFailure: true,
+      ),
+    );
   }
 
   Future<void> _onStartHosting(
@@ -175,9 +181,15 @@ class LanLobbyBloc extends Bloc<LanLobbyEvent, LanLobbyState> {
           isHost: event.isHost,
         ),
       );
+    } else if (event.isHost) {
+      emit(
+        state.copyWith(
+          status: LanLobbyStatus.hosting,
+          isHost: true,
+        ),
+      );
     } else {
-      // If we were connected/hosting and now disconnected, revert to initial found state
-      // Provide logic based on previous state if needed
+      // A non-host disconnect ends an active lobby session.
       if (state.status == LanLobbyStatus.connected ||
           state.status == LanLobbyStatus.hosting) {
         emit(state.copyWith(status: LanLobbyStatus.initial, isHost: false));

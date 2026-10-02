@@ -35,8 +35,9 @@
 | 4. 计时与撤销 | 59.999 秒不结束、60 秒判负；旧回合延迟事件不能结束新回合；本地后台暂停；PvP 撤销/重做 1 ply；AI 撤销/重做 2 ply；恢复双吃、未吃计数、当前方和计时；新落子清空重做链 | 可注入时钟 → 规则命令 → BLoC → 自动存档 |
 | 5. 存档、回放与统计 | 每次提交后覆盖保存；载入不删除；结束/明确放弃删除；随机先手和双吃完整往返；每步回放状态一致；最近 20 局封顶；双吃统计 +2；三种模式均且仅归档一次 | 存储仓库 → 回放 → 统计 → 首页继续游戏 |
 | 6. LAN 主机权威 | 客户端意图未确认前不提交棋盘；主机拒绝错方、非法和过期修订；重复意图幂等；乱序提交忽略；权威提交同步双吃、计数、结果和时间；29.999 秒内重连恢复；30 秒到期判负；断线期间计时继续；复局交替先手 | 协议 → 内存传输 → 双端 BLoC → LAN UI |
-| 7. 在线服务端权威 | 匿名身份绑定颜色；客户端不能声明颜色、吃子或结果；协议版本错误安全拒绝；提交前客户端棋盘不变化；确认/拒绝/修订缺口确定性处理；重复指令幂等；60 秒超时；30 秒重连恢复全量快照；Node 双 Socket.IO 客户端完成匹配、落子、断线、恢复和主动快照 | TypeScript 规则 → 房间管理 → Socket 网关 → 真实 Node Socket.IO 传输；Dart 协议/会话 → 在线 BLoC/UI 使用独立契约测试 |
+| 7. 在线服务端权威 | 匿名身份绑定颜色；客户端不能声明颜色、吃子或结果；协议版本错误安全拒绝；提交前客户端棋盘不变化；确认/拒绝/修订缺口确定性处理；重复指令幂等；60 秒超时；30 秒重连恢复全量快照；终局不可变快照；outbox 幂等、冲突、租约、退避、恢复和关机；Node 双 Socket.IO 客户端完成匹配、落子、断线、恢复和主动快照 | TypeScript 规则 → 房间管理 → Socket 网关 → 终局快照/outbox/数据库适配器 → 真实 Node Socket.IO 传输；Dart 协议/会话 → 在线 BLoC/UI 使用独立契约测试 |
 | 8. Phase 4 语音与冥想核心 | 隐藏阶段默认不初始化或播报 TTS；旧配置不能意外开启；识别原文不进入日志/状态字符串；用户坐标 1–4 与引擎坐标 0–3 的 16 格可逆；中心、否定、多坐标和尾随内容不猜测执行；假权限/识别/播报端口验证权限终态、单次监听、TTS completion、播报失败重播、抢占、中断、延迟启动和迟到回调；普通 PVE 只在用途说明后的真实玩家回合创建 session，使用权威 `humanPlayer`，位置/完整移动与触屏进入同一 BLoC 事件，AI 回合迟到结果被隔离，PVP 保持隐藏；冥想纯核心（session/controller + intent handler）覆盖开场后计时、AI 先手/重试、退出确认、暂停恢复、超时优先、双吃和 50 ply 计数；假端口完成一轮人类/AI 无屏闭环 | 坐标与类型化指令 → 可替换语音端口 → 纯状态机 → GameBloc/GameEngine 意图；VoiceInteractionController → MeditationIntentHandler → MeditationSessionController → MoveValidator/GameEngine/TurnClock → committed MeditationSession |
+| 9. AI 难度与战术 | AI 执行立即获胜的吃子；中等难度避开让对手下一手获胜的走法；简单难度只在合理候选中变化且有安全走法时不直接送出败局；困难难度识别中等搜索范围外的强制获胜路线；三档搜索深度、时间预算和递归节点量可区分；固定种子交替执色时困难稳定战胜简单 | `GameEngine` 纯模拟 → 零和局面评估 → 有界迭代加深 → `AIPlayer.selectMove` → PVE BLoC |
 
 ## 4. 规则场景明细
 
@@ -64,6 +65,20 @@
 - 本地模式验证后台暂停时剩余时间不减少，恢复后从保存值继续。
 - LAN 验证客户端显示时间不产生终局，只有主机可以提交超时结果。
 - 断线宽限与回合倒计时并行运行，二者均以主机时间为准。
+
+### 4.4 AI 难度与战术
+
+- AI 搜索只能通过 `GameEngine` 生成和模拟合法移动，不得复制吃子或终局规则。
+- 简单、中等、困难基础搜索深度分别为 2、4、6；棋子减少时允许在同一时间预算内动态加深。
+- 简单难度在评分靠前的候选中随机选择；存在立即获胜走法时只选择获胜候选，有安全走法时不直接选择下一手必败候选。
+- 中等难度必须抓住立即获胜机会，并至少识别和避开对手下一手即可获胜的走法。
+- 困难难度必须覆盖更深的强制获胜场景；固定随机种子、黑白交替的完整自博弈用于证明它与简单难度存在稳定棋力差异。
+- 每次搜索使用最后一个完整迭代的结果；超时中的半轮结果不得覆盖已完成深度，节点统计必须包含递归搜索。
+- 以结果中的 `completedDepth` 验证实际完成深度；使用注入的计时源验证中途超时，进度文案中的目标深度不作为完成证据。
+- 缓存只复用同搜索深度、同未吃子计数和同评分执色的精确结果；以独立全宽搜索比较冷/热缓存的评分和所选走法。
+- 评估器复用权威吃子机会检测，必须保持旋转、镜像不变性与双方评分零和。
+- Android/iOS 普通 PVE 与隐藏冥想组合通过 `BackgroundAI` 在原生后台 isolate 搜索；普通 PVE 对暂停、重开、载入、超时和关闭后的迟到结果校验有效性。
+- `dart run scripts/benchmark_ai.dart 4` 输出三个难度配对、不同开局及交换执色的逐局 JSON；每回合新建 AI 以匹配普通 PVE。有限样本记录胜/负/和与搜索耗时，不当作普遍胜率证明。
 
 ## 5. 持久化与兼容性
 
@@ -102,18 +117,27 @@
 
 ## 8. 自动化命令与门禁
 
-基础验证命令：
+Windows 本机基础验证入口：
 
 ```powershell
-dart format --output=none --set-exit-if-changed lib test integration_test
-flutter analyze
-flutter test
-flutter test integration_test
-flutter test --coverage
-Push-Location server
-npm test
-npm run build
-Pop-Location
+.\scripts\verify_release_candidate.ps1
+```
+
+该入口只使用已经安装的工具和已经解析的依赖，不执行环境或依赖安装。默认顺序执行 Dart 格式检查、Flutter analyze、普通 Flutter 单元/Widget 测试、服务端 `npm test`（其自身已包含 TypeScript/Prisma build）以及 Debug APK 构建，并将版本、commit、工作树、耗时、测试数量、APK 大小和 SHA-256 写入 `build\verification\<timestamp>\`。Debug APK 证据不替代正式签名 AAB 和商店门禁。
+
+专用 Android smoke 对简单、中等、困难分别完成玩家落子与 AI 响应，校验执色、历史、棋盘、未吃计数、存档及继续游戏。它输出 `FOURSQUARE_FRAME_TIMING=` JSON（Flutter build/raster 时间及构建模式），供原始证据归档。功能 smoke 关闭动画，其 Debug 数据不用于正式性能判定；正式性能需真机 Profile/Release 的连续走棋、困难 AI 思考、动画和页面滚动样本。Android `gfxinfo` 可能只包含原生窗口的部分渲染，不单独作为 Flutter 卡顿率门禁。
+
+专用 Android API 34 冒烟会清理应用数据，默认不运行；仅在目标确认为专用 AVD 后显式启用：
+
+```powershell
+.\scripts\verify_release_candidate.ps1 -IncludeAndroidSmoke
+```
+
+需要单独补充的非默认验证：
+
+```powershell
+flutter test --no-pub --coverage
+flutter test -d <dedicated-device-id> integration_test
 flutter test test/integration/online_game_transport_real_server_test.dart --dart-define=RUN_ONLINE_REAL_SERVER_E2E=true --timeout 60s
 ```
 
@@ -142,6 +166,6 @@ flutter test
 - 棋盘场景使用统一 builder/fixture，显式列出 4×4 内容和当前行棋方，避免通过初始棋盘叠加残留棋子造成误判。
 - 随机先手使用可注入、可固定的随机源；测试不得依赖概率。
 - 时间测试使用假时钟；测试不得 `sleep` 60 秒。
-- LAN 集成测试优先使用内存双向传输模拟重复、丢失和乱序；真机测试补充 mDNS、WebSocket 和生命周期行为。在线 Socket 层先使用假 IO 验证契约，再以本地真实 Node 双 Socket 测试和显式启用的双 Flutter `OnlineGameTransport` 测试补充传输行为，最后在隔离 staging 验证真实数据库、TLS、进程恢复和负载。
+- LAN 集成测试优先使用内存双向传输模拟重复、丢失和乱序；真机测试补充 mDNS、WebSocket 和生命周期行为。在线 Socket 层先使用假 IO 验证契约，再以本地真实 Node 双 Socket 测试和显式启用的双 Flutter `OnlineGameTransport` 测试补充传输行为；同库 outbox 先以纯仓库、worker、数据库适配器和 migration 静态契约覆盖幂等与恢复，最后在隔离 staging 验证真实 PostgreSQL migration/回滚、双 worker/慢租约、TLS、进程恢复和负载。
 - 断言应同时检查结果和状态不变量：棋盘、当前方、吃子列表、未吃计数、时间、修订号、历史和统计。
 - 不以覆盖率代替场景验收；关键规则分支必须有明确、可读的行为测试名称。

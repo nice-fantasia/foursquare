@@ -187,6 +187,7 @@ class _LanGameViewBodyState extends State<_LanGameViewBody> {
             moveHistory: history,
             canUndo: false, // No undo in LAN for now
             canRedo: false,
+            flipBoard: localColor == PieceType.white,
             turnRemaining:
                 turnRemaining.isNegative ? Duration.zero : turnRemaining,
             onRestart: null,

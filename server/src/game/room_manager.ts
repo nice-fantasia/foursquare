@@ -304,6 +304,26 @@ export class RoomManager extends EventEmitter {
         return undefined;
     }
 
+    public dispose(): void {
+        for (const room of this.rooms.values()) {
+            this.cancelTurnTimer(room);
+            if (room.cleanupTimer !== undefined) {
+                this.options.cancelSchedule(room.cleanupTimer);
+                room.cleanupTimer = undefined;
+            }
+        }
+        for (const disconnected of this.disconnectedPlayers.values()) {
+            this.cancelDisconnectTimer(disconnected);
+        }
+        this.rooms.clear();
+        this.playerRoomMap.clear();
+        this.matchmakingQueue.length = 0;
+        this.processedCommands.clear();
+        this.disconnectedPlayers.clear();
+        this.cleanupScheduledRooms.clear();
+        this.removeAllListeners();
+    }
+
     public resumePlayer(
         playerId: string,
         socketId: string,

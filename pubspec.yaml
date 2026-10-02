@@ -73,7 +73,6 @@ flutter:
   generate: true  # 启用国际化自动生成
   
   assets:
-    - assets/images/
     - assets/sounds/
     - assets/sounds/music/
     - assets/sounds/select.wav

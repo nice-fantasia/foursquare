@@ -1,6 +1,9 @@
+# Local development only. Production uses docker-compose.production.yml.
 services:
   server:
-    build: .
+    build:
+      context: .
+      target: build
     ports:
       - "3000:3000"
     volumes:

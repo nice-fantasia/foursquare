@@ -29,7 +29,7 @@ test('two real Socket.IO clients match, move, disconnect and resume', async (t) 
     createSocketGateway(
         ioServer as unknown as Parameters<typeof createSocketGateway>[0],
         manager,
-        async () => undefined,
+        async () => 'enqueued' as const,
     );
     await new Promise<void>((resolve) => httpServer.listen(0, resolve));
     const address = httpServer.address() as AddressInfo;

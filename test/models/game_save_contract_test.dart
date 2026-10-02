@@ -45,4 +45,37 @@ void main() {
     expect(restoredMove.player, PieceType.black);
     expect(restoredMove.timestamp, DateTime.utc(2026, 8, 1, 10, 30));
   });
+
+  test('v1存档缺少新增字段时按既有兼容规则恢复', () {
+    final json = <String, dynamic>{
+      'id': 'legacy-game',
+      'saveTime': '2026-08-01T10:31:00.000Z',
+      'boardState':
+          BoardStateData.fromBoardState(BoardState.initial()).toJson(),
+      'moveHistory': <Map<String, dynamic>>[
+        <String, dynamic>{
+          'from': const PositionData(x: 0, y: 0).toJson(),
+          'to': const PositionData(x: 0, y: 1).toJson(),
+          'capturedPosition': const PositionData(x: 3, y: 3).toJson(),
+          'capturedPiece': 'black',
+        },
+      ],
+      'currentPlayer': 'white',
+      'mode': 'pvp',
+    };
+
+    final restored = GameSave.fromJson(json);
+    final restoredMove = restored.moveHistory.single.toMove();
+
+    expect(restored.schemaVersion, 1);
+    expect(restored.startingPlayer, 'black');
+    expect(restored.noCapturePlyCount, 0);
+    expect(restored.turnRemainingMilliseconds, 60000);
+    expect(restoredMove.player, PieceType.black);
+    expect(restoredMove.capturedPieces, const [Position(3, 3)]);
+    expect(
+      restoredMove.timestamp,
+      DateTime.fromMillisecondsSinceEpoch(0),
+    );
+  });
 }

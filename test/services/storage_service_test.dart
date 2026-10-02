@@ -17,9 +17,14 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hive/hive.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:foursquare/meditation/meditation_session_persistence.dart';
+import 'package:foursquare/models/board_state.dart';
 import 'package:foursquare/models/game_record.dart';
 import 'package:foursquare/models/game_result.dart';
+import 'package:foursquare/models/game_save.dart';
+import 'package:foursquare/models/move.dart';
 import 'package:foursquare/models/piece_type.dart';
+import 'package:foursquare/models/position.dart';
+import 'package:foursquare/services/online_identity_service.dart';
 import 'package:foursquare/services/storage_service.dart';
 
 void main() {
@@ -228,6 +233,81 @@ void main() {
     });
   });
 
+  group('游戏存档可用性', () {
+    late Directory temporaryDirectory;
+    late Box<dynamic> gameSaveBox;
+    late StorageService storageService;
+
+    setUp(() async {
+      temporaryDirectory = await Directory.systemTemp.createTemp(
+        'foursquare-game-save-test-',
+      );
+      Hive.init(temporaryDirectory.path);
+      gameSaveBox = await Hive.openBox<dynamic>('game-save-validity-test');
+      storageService = StorageService.forTesting(gameSaveBox: gameSaveBox);
+    });
+
+    tearDown(() async {
+      if (gameSaveBox.isOpen) {
+        await gameSaveBox.close();
+      }
+      await temporaryDirectory.delete(recursive: true);
+    });
+
+    test('损坏存档不显示继续游戏且不会被自动删除', () async {
+      await gameSaveBox.put('current_game_save', <String, dynamic>{
+        'schemaVersion': 2,
+        'id': 42,
+      });
+
+      expect(await storageService.loadGame(), isNull);
+      expect(await storageService.hasSavedGame(), isFalse);
+      expect(gameSaveBox.containsKey('current_game_save'), isTrue);
+    });
+
+    test('Hive重新打开后完整恢复进行中存档', () async {
+      final move = Move(
+        from: const Position(0, 0),
+        to: const Position(0, 1),
+        player: PieceType.black,
+        capturedPieces: const [Position(2, 3), Position(3, 3)],
+        timestamp: DateTime.utc(2026, 8, 24, 10),
+      );
+      final save = GameSave(
+        id: 'reopen-save',
+        matchId: 'reopen-match',
+        saveTime: DateTime.utc(2026, 8, 24, 10, 1),
+        startedAt: DateTime.utc(2026, 8, 24, 9, 58),
+        boardState: BoardStateData.fromBoardState(
+          BoardState.initial(currentPlayer: PieceType.white),
+        ),
+        moveHistory: [MoveData.fromMove(move)],
+        currentPlayer: 'white',
+        startingPlayer: 'black',
+        humanPlayer: 'black',
+        noCapturePlyCount: 19,
+        turnRemainingMilliseconds: 41000,
+        mode: 'pve',
+        aiDifficulty: 'medium',
+      );
+
+      expect(await storageService.saveGame(save), isTrue);
+      await gameSaveBox.close();
+      gameSaveBox = await Hive.openBox<dynamic>('game-save-validity-test');
+      storageService = StorageService.forTesting(gameSaveBox: gameSaveBox);
+
+      final restored = await storageService.loadGame();
+      expect(restored, isNotNull);
+      expect(restored!.matchId, 'reopen-match');
+      expect(restored.currentPlayer, 'white');
+      expect(restored.startingPlayer, 'black');
+      expect(restored.humanPlayer, 'black');
+      expect(restored.noCapturePlyCount, 19);
+      expect(restored.turnRemainingMilliseconds, 41000);
+      expect(restored.moveHistory.single.capturedPositions, hasLength(2));
+    });
+  });
+
   group('冥想存档所有权', () {
     late Directory temporaryDirectory;
     late Box<dynamic> statisticsBox;
@@ -244,7 +324,10 @@ void main() {
       gameSaveBox = await Hive.openBox<dynamic>('game-save-reset-test');
       meditationBox =
           await Hive.openBox<dynamic>('meditation-session-reset-test');
-      SharedPreferences.setMockInitialValues({'test': true});
+      SharedPreferences.setMockInitialValues({
+        'test': true,
+        OnlineIdentityService.storageKey: 'device-existing',
+      });
       storageService = StorageService.forTesting(
         statisticsBox: statisticsBox,
         gameSaveBox: gameSaveBox,
@@ -260,7 +343,7 @@ void main() {
       await temporaryDirectory.delete(recursive: true);
     });
 
-    test('全部重置同时清理冥想存档', () async {
+    test('全部重置清理本地数据并保留在线身份', () async {
       await statisticsBox.put('value', 1);
       await gameSaveBox.put('value', 1);
       await meditationBox.put('value', 1);
@@ -270,6 +353,12 @@ void main() {
       expect(statisticsBox.isEmpty, true);
       expect(gameSaveBox.isEmpty, true);
       expect(meditationBox.isEmpty, true);
+      final preferences = await SharedPreferences.getInstance();
+      expect(preferences.getBool('test'), isNull);
+      expect(
+        preferences.getString(OnlineIdentityService.storageKey),
+        'device-existing',
+      );
     });
 
     test('只能从已初始化的应用存储创建冥想仓库', () async {

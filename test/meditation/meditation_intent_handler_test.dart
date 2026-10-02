@@ -564,7 +564,10 @@ class _QueueAI extends AIPlayer {
   _QueueAI(this._moves) : super(AIDifficulty.easy);
 
   @override
-  Future<AIMoveResult?> selectMove(BoardState board) async {
+  Future<AIMoveResult?> selectMove(
+    BoardState board, {
+    int noCapturePlyCount = 0,
+  }) async {
     return _moves.isEmpty ? null : _moves.removeAt(0);
   }
 
@@ -582,7 +585,10 @@ final class _CountingAI extends AIPlayer {
   _CountingAI(this.result) : super(AIDifficulty.easy);
 
   @override
-  Future<AIMoveResult?> selectMove(BoardState board) async {
+  Future<AIMoveResult?> selectMove(
+    BoardState board, {
+    int noCapturePlyCount = 0,
+  }) async {
     calls += 1;
     return result;
   }
@@ -603,7 +609,10 @@ final class _DelayedCountingAI extends AIPlayer {
   void complete(AIMoveResult? result) => _result.complete(result);
 
   @override
-  Future<AIMoveResult?> selectMove(BoardState board) {
+  Future<AIMoveResult?> selectMove(
+    BoardState board, {
+    int noCapturePlyCount = 0,
+  }) {
     calls += 1;
     return _result.future;
   }

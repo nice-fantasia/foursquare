@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:bloc_test/bloc_test.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:foursquare/bloc/lan_lobby_bloc.dart';
@@ -10,17 +12,70 @@ import 'package:nsd/nsd.dart';
 class _MockLocalNetworkService extends Mock implements LocalNetworkService {}
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   late _MockLocalNetworkService networkService;
+  late StreamController<LocalNetworkConnectionState> connectionStates;
 
   setUp(() {
     networkService = _MockLocalNetworkService();
+    connectionStates =
+        StreamController<LocalNetworkConnectionState>.broadcast();
     when(() => networkService.connectionStateStream).thenAnswer(
-      (_) => const Stream<LocalNetworkConnectionState>.empty(),
+      (_) => connectionStates.stream,
     );
     when(() => networkService.foundServices).thenAnswer(
       (_) => const Stream<List<Service>>.empty(),
     );
   });
+
+  tearDown(() async {
+    await connectionStates.close();
+  });
+
+  test('real discovery errors reach the failure state', () async {
+    final service = LocalNetworkService();
+    final bloc = LanLobbyBloc(networkService: service);
+    final failure = bloc.stream
+        .firstWhere(
+          (state) => state.status == LanLobbyStatus.failure,
+        )
+        .timeout(const Duration(seconds: 1));
+    bloc.add(StartDiscovery());
+    try {
+      expect((await failure).failure, LanLobbyFailure.discovery);
+    } finally {
+      await service.stop();
+      await bloc.close();
+    }
+  });
+
+  blocTest<LanLobbyBloc, LanLobbyState>(
+    'stop discovery returns to idle and permits a new search',
+    build: () {
+      when(() => networkService.role).thenReturn(LocalNetworkRole.none);
+      when(() => networkService.startDiscovery()).thenAnswer((_) async {
+        connectionStates.add(LocalNetworkConnectionState.scanning);
+      });
+      when(() => networkService.stop()).thenAnswer((_) async {
+        connectionStates.add(LocalNetworkConnectionState.disconnected);
+      });
+      return LanLobbyBloc(networkService: networkService);
+    },
+    act: (bloc) async {
+      bloc.add(StartDiscovery());
+      await bloc.stream.firstWhere((s) => s.status == LanLobbyStatus.scanning);
+      bloc.add(StopDiscovery());
+      await bloc.stream
+          .firstWhere((s) => s.status == LanLobbyStatus.initial)
+          .timeout(const Duration(seconds: 1));
+      bloc.add(StartDiscovery());
+    },
+    expect: () => const [
+      LanLobbyState(status: LanLobbyStatus.scanning),
+      LanLobbyState(),
+      LanLobbyState(status: LanLobbyStatus.scanning),
+    ],
+  );
 
   blocTest<LanLobbyBloc, LanLobbyState>(
     'exposes a stable discovery failure without leaking exception text',
@@ -53,4 +108,29 @@ void main() {
 
     expect(retrying.failure, isNull);
   });
+
+  blocTest<LanLobbyBloc, LanLobbyState>(
+    'host startup remains in the waiting state while the service initializes',
+    build: () {
+      when(() => networkService.role).thenReturn(LocalNetworkRole.host);
+      when(
+        () => networkService.startHost(roomName: '我的棋室'),
+      ).thenAnswer((_) async {
+        connectionStates.add(LocalNetworkConnectionState.disconnected);
+        await Future<void>.delayed(Duration.zero);
+        connectionStates.add(LocalNetworkConnectionState.hosting);
+      });
+      return LanLobbyBloc(networkService: networkService);
+    },
+    act: (bloc) => bloc.add(const StartHosting(roomName: '我的棋室')),
+    wait: const Duration(milliseconds: 20),
+    expect: () => const <LanLobbyState>[
+      LanLobbyState(status: LanLobbyStatus.hosting, isHost: true),
+    ],
+    verify: (_) {
+      verify(
+        () => networkService.startHost(roomName: '我的棋室'),
+      ).called(1);
+    },
+  );
 }

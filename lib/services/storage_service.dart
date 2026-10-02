@@ -19,6 +19,7 @@ import '../models/game_result.dart';
 import '../constants/storage_constants.dart';
 import '../meditation/meditation_session_persistence.dart';
 import 'logger_service.dart';
+import 'online_identity_service.dart';
 
 /// 游戏设置数据模型
 class GameSettings {
@@ -381,10 +382,16 @@ class StorageService {
     }
   }
 
-  /// 重置所有数据（包括设置）
+  /// 重置所有本地数据（包括设置）。
+  ///
+  /// 在线匿名身份关联服务端数据，只能由 OnlineIdentityService 在服务端
+  /// 确认删除后替换，因此普通本地重置始终保留该键。
   Future<bool> resetAll() async {
     try {
-      await _prefs!.clear();
+      for (final key in _prefs!.getKeys().toList(growable: false)) {
+        if (key == OnlineIdentityService.storageKey) continue;
+        if (!await _prefs!.remove(key)) return false;
+      }
       await _statisticsBox!.clear();
       await _gameSaveBox!.clear();
       await _meditationSessionBox!.clear();
@@ -450,7 +457,10 @@ class StorageService {
   /// 检查是否有存档
   Future<bool> hasSavedGame() async {
     try {
-      return _gameSaveBox!.containsKey(_keyGameSave);
+      if (!_gameSaveBox!.containsKey(_keyGameSave)) {
+        return false;
+      }
+      return await loadGame() != null;
     } catch (e) {
       return false;
     }

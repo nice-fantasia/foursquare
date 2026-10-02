@@ -7,6 +7,7 @@ import 'package:foursquare/bloc/game_event.dart';
 import 'package:foursquare/bloc/game_state.dart';
 import 'package:foursquare/models/board_state.dart';
 import 'package:foursquare/models/game_result.dart';
+import 'package:foursquare/models/move.dart';
 import 'package:foursquare/models/piece_type.dart';
 import 'package:foursquare/models/position.dart';
 import 'package:foursquare/services/voice/game_voice_session.dart';
@@ -179,6 +180,558 @@ void main() {
     await session.dispose();
   });
 
+  test('a full move speaks only after the authoritative commit', () async {
+    var currentState = _playing();
+    final authoritativeStates = StreamController<GameState>();
+    when(() => bloc.state).thenAnswer((_) => currentState);
+    whenListen(
+      bloc,
+      authoritativeStates.stream,
+      initialState: currentState,
+    );
+    final session = BlocGameVoiceSession(
+      bloc: bloc,
+      controlledPlayer: PieceType.black,
+      permission: permission,
+      recognition: recognition,
+      synthesis: synthesis,
+    );
+    await session.enableAfterDisclosure();
+
+    await session.listenOnce();
+    recognition.emitFinal('从A1移动到A2');
+    await Future<void>.delayed(Duration.zero);
+
+    expect(synthesis.spokenTexts, isEmpty);
+    verify(() => bloc.add(any(that: isA<MovePieceEvent>()))).called(1);
+
+    final committedMove = Move(
+      from: const Position(0, 0),
+      to: const Position(0, 1),
+      player: PieceType.black,
+      timestamp: DateTime.utc(2026),
+    );
+    currentState = _playing(
+      currentPlayer: PieceType.white,
+      isAIThinking: true,
+      moveHistory: [committedMove],
+      lastMove: committedMove,
+    );
+    authoritativeStates.add(currentState);
+    await session.updateAvailability(appIsActive: true);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(synthesis.spokenTexts, ['移动成功']);
+    expect(recognition.listenCalls, 1);
+    await authoritativeStates.close();
+    await session.dispose();
+  });
+
+  test('AI updates cannot interrupt committed-result playback', () async {
+    GameState currentState = _playing();
+    final authoritativeStates = StreamController<GameState>();
+    when(() => bloc.state).thenAnswer((_) => currentState);
+    whenListen(
+      bloc,
+      authoritativeStates.stream,
+      initialState: currentState,
+    );
+    final session = BlocGameVoiceSession(
+      bloc: bloc,
+      controlledPlayer: PieceType.black,
+      permission: permission,
+      recognition: recognition,
+      synthesis: synthesis,
+    );
+    await session.enableAfterDisclosure();
+    synthesis.holdNextSpeak();
+
+    await session.listenOnce();
+    recognition.emitFinal('从A1移动到A2');
+    await Future<void>.delayed(Duration.zero);
+
+    final committedMove = Move(
+      from: const Position(0, 0),
+      to: const Position(0, 1),
+      player: PieceType.black,
+      timestamp: DateTime.utc(2026),
+    );
+    currentState = _playing(
+      currentPlayer: PieceType.white,
+      isAIThinking: true,
+      moveHistory: [committedMove],
+      lastMove: committedMove,
+    );
+    authoritativeStates.add(currentState);
+    await Future<void>.delayed(Duration.zero);
+    expect(session.state.phase, VoiceInteractionPhase.speaking);
+
+    await session.updateAvailability(appIsActive: true);
+    expect(synthesis.stopCalls, 0);
+    expect(session.state.phase, VoiceInteractionPhase.speaking);
+
+    synthesis.completeSpeak();
+    await Future<void>.delayed(Duration.zero);
+    expect(synthesis.spokenTexts, ['移动成功']);
+    await authoritativeStates.close();
+    await session.dispose();
+  });
+
+  test('a failed committed-result speech can replay without another move',
+      () async {
+    GameState currentState = _playing();
+    final authoritativeStates = StreamController<GameState>();
+    when(() => bloc.state).thenAnswer((_) => currentState);
+    whenListen(
+      bloc,
+      authoritativeStates.stream,
+      initialState: currentState,
+    );
+    final session = BlocGameVoiceSession(
+      bloc: bloc,
+      controlledPlayer: PieceType.black,
+      permission: permission,
+      recognition: recognition,
+      synthesis: synthesis,
+    );
+    await session.enableAfterDisclosure();
+    synthesis.failNextSpeak = true;
+
+    await session.listenOnce();
+    recognition.emitFinal('从A1移动到A2');
+    await Future<void>.delayed(Duration.zero);
+
+    final committedMove = Move(
+      from: const Position(0, 0),
+      to: const Position(0, 1),
+      player: PieceType.black,
+      timestamp: DateTime.utc(2026),
+    );
+    currentState = _playing(
+      currentPlayer: PieceType.white,
+      isAIThinking: true,
+      moveHistory: [committedMove],
+      lastMove: committedMove,
+    );
+    authoritativeStates.add(currentState);
+    await session.updateAvailability(appIsActive: true);
+    await Future<void>.delayed(Duration.zero);
+    expect(session.state.phase, VoiceInteractionPhase.awaitingReplay);
+
+    await session.replayPendingReply();
+    await Future<void>.delayed(Duration.zero);
+
+    verify(() => bloc.add(any(that: isA<MovePieceEvent>()))).called(1);
+    expect(synthesis.spokenTexts, ['移动成功', '移动成功']);
+    expect(recognition.listenCalls, 1);
+    await authoritativeStates.close();
+    await session.dispose();
+  });
+
+  test('an interrupted committed result remains replayable after resume',
+      () async {
+    GameState currentState = _playing();
+    final authoritativeStates = StreamController<GameState>();
+    when(() => bloc.state).thenAnswer((_) => currentState);
+    whenListen(
+      bloc,
+      authoritativeStates.stream,
+      initialState: currentState,
+    );
+    final session = BlocGameVoiceSession(
+      bloc: bloc,
+      controlledPlayer: PieceType.black,
+      permission: permission,
+      recognition: recognition,
+      synthesis: synthesis,
+    );
+    await session.enableAfterDisclosure();
+    synthesis.holdNextSpeak();
+
+    await session.listenOnce();
+    recognition.emitFinal('从A1移动到A2');
+    await Future<void>.delayed(Duration.zero);
+
+    final committedMove = Move(
+      from: const Position(0, 0),
+      to: const Position(0, 1),
+      player: PieceType.black,
+      timestamp: DateTime.utc(2026),
+    );
+    currentState = _playing(
+      currentPlayer: PieceType.white,
+      isAIThinking: true,
+      moveHistory: [committedMove],
+      lastMove: committedMove,
+    );
+    authoritativeStates.add(currentState);
+    await Future<void>.delayed(Duration.zero);
+    expect(session.state.phase, VoiceInteractionPhase.speaking);
+
+    await session.updateAvailability(appIsActive: false);
+    expect(session.state.phase, VoiceInteractionPhase.awaitingReplay);
+    synthesis.completeSpeak();
+    await Future<void>.delayed(Duration.zero);
+    await session.updateAvailability(appIsActive: true);
+    expect(session.state.phase, VoiceInteractionPhase.awaitingReplay);
+
+    await session.replayPendingReply();
+    await Future<void>.delayed(Duration.zero);
+    verify(() => bloc.add(any(that: isA<MovePieceEvent>()))).called(1);
+    expect(synthesis.spokenTexts, ['移动成功', '移动成功']);
+    expect(recognition.listenCalls, 1);
+    await authoritativeStates.close();
+    await session.dispose();
+  });
+
+  test('restarting after terminal speech failure discards the old result',
+      () async {
+    GameState currentState = _playing(matchId: 'match-1');
+    final authoritativeStates = StreamController<GameState>();
+    when(() => bloc.state).thenAnswer((_) => currentState);
+    whenListen(
+      bloc,
+      authoritativeStates.stream,
+      initialState: currentState,
+    );
+    final session = BlocGameVoiceSession(
+      bloc: bloc,
+      controlledPlayer: PieceType.black,
+      permission: permission,
+      recognition: recognition,
+      synthesis: synthesis,
+    );
+    await session.enableAfterDisclosure();
+    synthesis.failNextSpeak = true;
+
+    await session.listenOnce();
+    recognition.emitFinal('从A1移动到A2');
+    await Future<void>.delayed(Duration.zero);
+
+    final committedMove = Move(
+      from: const Position(0, 0),
+      to: const Position(0, 1),
+      player: PieceType.black,
+      timestamp: DateTime.utc(2026),
+    );
+    currentState = GameOver(
+      boardState: BoardState.initial(currentPlayer: PieceType.white),
+      mode: GameMode.pve,
+      gameResult: GameResult.blackWin(
+        reason: 'test',
+        moveCount: 1,
+        duration: const Duration(seconds: 1),
+      ),
+      moveHistory: [committedMove],
+      lastMove: committedMove,
+      firstPlayer: PieceType.black,
+      humanPlayer: PieceType.black,
+      matchId: 'match-1',
+    );
+    authoritativeStates.add(currentState);
+    await session.updateAvailability(appIsActive: true);
+    await Future<void>.delayed(Duration.zero);
+    expect(session.state.phase, VoiceInteractionPhase.awaitingReplay);
+
+    currentState = _playing(matchId: 'match-2');
+    when(() => bloc.state).thenReturn(currentState);
+    authoritativeStates.add(currentState);
+    await Future<void>.delayed(Duration.zero);
+    await session.updateAvailability(appIsActive: true);
+    await session.replayPendingReply();
+    await Future<void>.delayed(Duration.zero);
+
+    expect(synthesis.spokenTexts, ['移动成功，你获胜了']);
+    await authoritativeStates.close();
+    await session.dispose();
+  });
+
+  test('restarting while an old result is speaking stops that result',
+      () async {
+    GameState currentState = _playing(matchId: 'match-1');
+    final authoritativeStates = StreamController<GameState>();
+    when(() => bloc.state).thenAnswer((_) => currentState);
+    whenListen(
+      bloc,
+      authoritativeStates.stream,
+      initialState: currentState,
+    );
+    final session = BlocGameVoiceSession(
+      bloc: bloc,
+      controlledPlayer: PieceType.black,
+      permission: permission,
+      recognition: recognition,
+      synthesis: synthesis,
+    );
+    await session.enableAfterDisclosure();
+    synthesis.holdNextSpeak();
+
+    await session.listenOnce();
+    recognition.emitFinal('从A1移动到A2');
+    await Future<void>.delayed(Duration.zero);
+
+    final committedMove = Move(
+      from: const Position(0, 0),
+      to: const Position(0, 1),
+      player: PieceType.black,
+      timestamp: DateTime.utc(2026),
+    );
+    currentState = _playing(
+      currentPlayer: PieceType.white,
+      isAIThinking: true,
+      moveHistory: [committedMove],
+      lastMove: committedMove,
+      matchId: 'match-1',
+    );
+    authoritativeStates.add(currentState);
+    await Future<void>.delayed(Duration.zero);
+    expect(session.state.phase, VoiceInteractionPhase.speaking);
+
+    currentState = _playing(matchId: 'match-2');
+    when(() => bloc.state).thenReturn(currentState);
+    await session.updateAvailability(appIsActive: true);
+
+    expect(synthesis.stopCalls, 1);
+    expect(session.state.phase, VoiceInteractionPhase.ready);
+    synthesis.completeSpeak();
+    await Future<void>.delayed(Duration.zero);
+    await session.replayPendingReply();
+    expect(synthesis.spokenTexts, ['移动成功']);
+    await authoritativeStates.close();
+    await session.dispose();
+  });
+
+  test('an authoritative double capture speaks the complete result', () async {
+    var currentState = _playing();
+    final authoritativeStates = StreamController<GameState>();
+    when(() => bloc.state).thenAnswer((_) => currentState);
+    whenListen(
+      bloc,
+      authoritativeStates.stream,
+      initialState: currentState,
+    );
+    final session = BlocGameVoiceSession(
+      bloc: bloc,
+      controlledPlayer: PieceType.black,
+      permission: permission,
+      recognition: recognition,
+      synthesis: synthesis,
+    );
+    await session.enableAfterDisclosure();
+
+    await session.listenOnce();
+    recognition.emitFinal('从A1移动到A2');
+    await Future<void>.delayed(Duration.zero);
+
+    final committedMove = Move(
+      from: const Position(0, 0),
+      to: const Position(0, 1),
+      player: PieceType.black,
+      capturedPieces: const [Position(1, 1), Position(2, 2)],
+      timestamp: DateTime.utc(2026),
+    );
+    currentState = _playing(
+      currentPlayer: PieceType.white,
+      isAIThinking: true,
+      moveHistory: [committedMove],
+      lastMove: committedMove,
+    );
+    authoritativeStates.add(currentState);
+    await session.updateAvailability(appIsActive: true);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(synthesis.spokenTexts, ['移动成功，吃掉两枚棋子']);
+    await authoritativeStates.close();
+    await session.dispose();
+  });
+
+  test('an authoritative terminal move speaks the controlled result', () async {
+    GameState currentState = _playing();
+    final authoritativeStates = StreamController<GameState>();
+    when(() => bloc.state).thenAnswer((_) => currentState);
+    whenListen(
+      bloc,
+      authoritativeStates.stream,
+      initialState: currentState,
+    );
+    final session = BlocGameVoiceSession(
+      bloc: bloc,
+      controlledPlayer: PieceType.black,
+      permission: permission,
+      recognition: recognition,
+      synthesis: synthesis,
+    );
+    await session.enableAfterDisclosure();
+
+    await session.listenOnce();
+    recognition.emitFinal('从A1移动到A2');
+    await Future<void>.delayed(Duration.zero);
+
+    final committedMove = Move(
+      from: const Position(0, 0),
+      to: const Position(0, 1),
+      player: PieceType.black,
+      timestamp: DateTime.utc(2026),
+    );
+    currentState = GameOver(
+      boardState: BoardState.initial(currentPlayer: PieceType.white),
+      mode: GameMode.pve,
+      gameResult: GameResult.blackWin(
+        reason: 'test',
+        moveCount: 1,
+        duration: const Duration(seconds: 1),
+      ),
+      moveHistory: [committedMove],
+      lastMove: committedMove,
+      firstPlayer: PieceType.black,
+      humanPlayer: PieceType.black,
+    );
+    authoritativeStates.add(currentState);
+    await session.updateAvailability(appIsActive: true);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(synthesis.spokenTexts, ['移动成功，你获胜了']);
+    await authoritativeStates.close();
+    await session.dispose();
+  });
+
+  test('an uncommitted move never speaks a false success', () async {
+    final currentState = _playing();
+    final authoritativeStates = StreamController<GameState>();
+    when(() => bloc.state).thenReturn(currentState);
+    whenListen(
+      bloc,
+      authoritativeStates.stream,
+      initialState: currentState,
+    );
+    final session = BlocGameVoiceSession(
+      bloc: bloc,
+      controlledPlayer: PieceType.black,
+      permission: permission,
+      recognition: recognition,
+      synthesis: synthesis,
+      committedOutcomeTimeout: const Duration(milliseconds: 10),
+    );
+    await session.enableAfterDisclosure();
+
+    await session.listenOnce();
+    recognition.emitFinal('从A1移动到A2');
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+
+    verify(() => bloc.add(any(that: isA<MovePieceEvent>()))).called(1);
+    expect(synthesis.spokenTexts, isEmpty);
+    expect(session.state.phase, VoiceInteractionPhase.ready);
+    await authoritativeStates.close();
+    await session.dispose();
+  });
+
+  test('backgrounding while a move commits never speaks in the background',
+      () async {
+    GameState currentState = _playing();
+    final authoritativeStates = StreamController<GameState>();
+    when(() => bloc.state).thenAnswer((_) => currentState);
+    whenListen(
+      bloc,
+      authoritativeStates.stream,
+      initialState: currentState,
+    );
+    final session = BlocGameVoiceSession(
+      bloc: bloc,
+      controlledPlayer: PieceType.black,
+      permission: permission,
+      recognition: recognition,
+      synthesis: synthesis,
+    );
+    await session.enableAfterDisclosure();
+
+    await session.listenOnce();
+    recognition.emitFinal('从A1移动到A2');
+    await Future<void>.delayed(Duration.zero);
+    await session.updateAvailability(appIsActive: false);
+
+    final committedMove = Move(
+      from: const Position(0, 0),
+      to: const Position(0, 1),
+      player: PieceType.black,
+      timestamp: DateTime.utc(2026),
+    );
+    currentState = _playing(
+      currentPlayer: PieceType.white,
+      isAIThinking: true,
+      moveHistory: [committedMove],
+      lastMove: committedMove,
+    );
+    authoritativeStates.add(currentState);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(synthesis.spokenTexts, isEmpty);
+    expect(session.state.phase, VoiceInteractionPhase.interrupted);
+    await authoritativeStates.close();
+    await session.dispose();
+  });
+
+  test('disposing cancels an outstanding committed-move waiter', () async {
+    final currentState = _playing();
+    final waiterCancelled = Completer<void>();
+    final authoritativeStates = StreamController<GameState>(
+      onCancel: () {
+        if (!waiterCancelled.isCompleted) waiterCancelled.complete();
+      },
+    );
+    when(() => bloc.state).thenReturn(currentState);
+    when(() => bloc.stream).thenAnswer((_) => authoritativeStates.stream);
+    final session = BlocGameVoiceSession(
+      bloc: bloc,
+      controlledPlayer: PieceType.black,
+      permission: permission,
+      recognition: recognition,
+      synthesis: synthesis,
+      committedOutcomeTimeout: const Duration(hours: 1),
+    );
+    await session.enableAfterDisclosure();
+
+    await session.listenOnce();
+    recognition.emitFinal('从A1移动到A2');
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    verify(() => bloc.add(any(that: isA<MovePieceEvent>()))).called(1);
+    await session.dispose();
+
+    await waiterCancelled.future.timeout(const Duration(milliseconds: 100));
+    await authoritativeStates.close();
+  });
+
+  test('a dispatch failure cancels the committed-move waiter', () async {
+    final currentState = _playing();
+    final waiterCancelled = Completer<void>();
+    final authoritativeStates = StreamController<GameState>(
+      onCancel: () {
+        if (!waiterCancelled.isCompleted) waiterCancelled.complete();
+      },
+    );
+    when(() => bloc.state).thenReturn(currentState);
+    when(() => bloc.stream).thenAnswer((_) => authoritativeStates.stream);
+    when(() => bloc.add(any())).thenThrow(StateError('bloc closed'));
+    final session = BlocGameVoiceSession(
+      bloc: bloc,
+      controlledPlayer: PieceType.black,
+      permission: permission,
+      recognition: recognition,
+      synthesis: synthesis,
+      committedOutcomeTimeout: const Duration(hours: 1),
+    );
+    await session.enableAfterDisclosure();
+
+    await session.listenOnce();
+    recognition.emitFinal('从A1移动到A2');
+    await waiterCancelled.future.timeout(const Duration(milliseconds: 100));
+    await Future<void>.delayed(Duration.zero);
+
+    expect(synthesis.spokenTexts, isEmpty);
+    expect(session.state.failure, VoicePortFailure.commandFailed);
+    await authoritativeStates.close();
+    await session.dispose();
+  });
+
   test('a late final result after the AI turn begins cannot enter the BLoC',
       () async {
     var currentState = _playing();
@@ -261,6 +814,9 @@ GamePlaying _playing({
   GameMode mode = GameMode.pve,
   PieceType currentPlayer = PieceType.black,
   bool isAIThinking = false,
+  List<Move> moveHistory = const [],
+  Move? lastMove,
+  String matchId = 'match',
 }) {
   return GamePlaying(
     boardState: BoardState.initial(currentPlayer: currentPlayer),
@@ -268,6 +824,9 @@ GamePlaying _playing({
     humanPlayer: mode == GameMode.pve ? PieceType.black : null,
     firstPlayer: PieceType.black,
     isAIThinking: isAIThinking,
+    moveHistory: moveHistory,
+    lastMove: lastMove,
+    matchId: matchId,
   );
 }
 
@@ -355,6 +914,19 @@ final class _RecognitionPort implements VoiceRecognitionPort {
 
 final class _SynthesisPort implements VoiceSynthesisPort {
   int initializeCalls = 0;
+  int stopCalls = 0;
+  bool failNextSpeak = false;
+  final List<String> spokenTexts = [];
+  Completer<void>? _speakCompleter;
+
+  void holdNextSpeak() {
+    _speakCompleter = Completer<void>();
+  }
+
+  void completeSpeak() {
+    _speakCompleter?.complete();
+    _speakCompleter = null;
+  }
 
   @override
   Future<void> dispose() async {}
@@ -366,8 +938,18 @@ final class _SynthesisPort implements VoiceSynthesisPort {
   }
 
   @override
-  Future<void> speak(String text) async {}
+  Future<void> speak(String text) async {
+    spokenTexts.add(text);
+    if (failNextSpeak) {
+      failNextSpeak = false;
+      throw StateError('synthesis failed');
+    }
+    final completer = _speakCompleter;
+    if (completer != null) await completer.future;
+  }
 
   @override
-  Future<void> stop() async {}
+  Future<void> stop() async {
+    stopCalls += 1;
+  }
 }

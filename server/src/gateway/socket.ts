@@ -1,10 +1,12 @@
-import type { Server } from 'socket.io';
-
 import {
     MatchmakingResult,
     RoomManager,
 } from '../game/room_manager';
-import { dbService } from '../services/database';
+import {
+    createFinishedMatchRecord,
+    type FinishedMatchRecord,
+} from '../persistence/finished_match_record';
+import type { MatchOutboxEnqueueResult } from '../persistence/match_outbox';
 import type { GameState, Player, Room } from '../types/game';
 import type {
     AuthoritativeSnapshot,
@@ -57,11 +59,18 @@ type RoomManagerLike = {
     getDisconnectDeadline: (socketId: string) => number | undefined;
 };
 
-type PersistFinishedRoom = (room: Room) => Promise<unknown> | unknown;
+type PersistFinishedMatch = (
+    record: FinishedMatchRecord,
+) => Promise<MatchOutboxEnqueueResult> | MatchOutboxEnqueueResult;
 type PersistenceRetryScheduler = (
     callback: () => void,
     delayMs: number,
 ) => unknown;
+type PersistenceRetryCanceller = (handle: unknown) => void;
+
+export type SocketGatewayLifecycle = {
+    shutdown: () => Promise<void>;
+};
 
 type MovePayloadParseResult =
     | { valid: true; intent: MoveIntent }
@@ -94,18 +103,31 @@ type SnapshotRequestParseResult =
         reason: 'invalid_protocol' | 'invalid_payload';
     };
 
-const roomManager = new RoomManager();
 const COMPLETION_RETENTION_MS = 5 * 60_000;
 const MAX_PERSISTENCE_RETRY_DELAY_MS = 30_000;
+const MAX_PERSISTENCE_CONCURRENCY = 2;
 const WIRE_IDENTIFIER = /^[A-Za-z0-9_-]+$/;
 
-export const initGameServer = (io: Server): void => {
-    createSocketGateway(
-        io as unknown as IoLike,
-        roomManager,
-        persistFinishedRoom,
+const persistenceRetryDelay = (
+    attemptNumber: number,
+    randomValue: number,
+): number => {
+    const exponent = Math.max(0, Math.min(30, attemptNumber - 1));
+    const exponential = Math.min(
+        MAX_PERSISTENCE_RETRY_DELAY_MS,
+        1_000 * (2 ** exponent),
     );
+    const boundedRandom = Math.max(0, Math.min(1, randomValue));
+    return Math.max(1, Math.min(
+        MAX_PERSISTENCE_RETRY_DELAY_MS,
+        Math.round(exponential * (0.5 + boundedRandom)),
+    ));
 };
+
+const isMatchOutboxEnqueueResult = (
+    value: unknown,
+): value is MatchOutboxEnqueueResult =>
+    value === 'enqueued' || value === 'duplicate';
 
 /**
  * Registers the online-game transport around an authoritative room manager.
@@ -115,16 +137,34 @@ export const initGameServer = (io: Server): void => {
 export const createSocketGateway = (
     io: IoLike,
     manager: RoomManagerLike,
-    persist: PersistFinishedRoom,
+    persist: PersistFinishedMatch,
     schedulePersistenceRetry: PersistenceRetryScheduler = (
         callback,
         delayMs,
     ) => setTimeout(callback, delayMs),
     now: () => number = Date.now,
-): void => {
+    cancelPersistenceRetry: PersistenceRetryCanceller = (handle) =>
+        clearTimeout(handle as NodeJS.Timeout),
+    random: () => number = Math.random,
+): SocketGatewayLifecycle => {
     const activeRooms = new Map<string, Room>();
     const completedMatchIds = new Map<string, number>();
     const persistenceInFlight = new Set<string>();
+    const persistenceTasks = new Set<Promise<void>>();
+    const scheduledRetries = new Map<unknown, {
+        record: FinishedMatchRecord;
+        attemptNumber: number;
+    }>();
+    const finalFlushAttempted = new Set<string>();
+    const finalFlushQueue: FinishedMatchRecord[] = [];
+    const queuedAttempts: Array<{
+        record: FinishedMatchRecord;
+        attemptNumber: number;
+    }> = [];
+    let activePersistenceAttempts = 0;
+    let finalFlushFailures = 0;
+    let shuttingDown = false;
+    let shutdownPromise: Promise<void> | undefined;
 
     const registerRoom = (room: Room | undefined): void => {
         if (room) activeRooms.set(room.id, room);
@@ -135,58 +175,180 @@ export const createSocketGateway = (
         state: GameState,
         knownRoom?: Room,
     ): void => {
-        const oldestRetainedCompletion = now() - COMPLETION_RETENTION_MS;
+        if (shuttingDown) return;
+        const completedAtEpochMs = now();
+        const oldestRetainedCompletion = completedAtEpochMs
+            - COMPLETION_RETENTION_MS;
         for (const [completedId, completedAt] of completedMatchIds) {
             if (completedAt <= oldestRetainedCompletion) {
                 completedMatchIds.delete(completedId);
             }
         }
+        const room = knownRoom ?? activeRooms.get(roomId);
+        activeRooms.delete(roomId);
         if (completedMatchIds.has(roomId)) return;
-        completedMatchIds.set(roomId, now());
+        completedMatchIds.set(roomId, completedAtEpochMs);
         io.to(roomId).emit('game_over', {
             protocolVersion: PROTOCOL_VERSION,
             matchId: roomId,
             state,
         });
 
-        const room = knownRoom ?? activeRooms.get(roomId);
-        activeRooms.delete(roomId);
         if (!room) return;
-        persistWithRetry(room);
+        persistWithRetry(createFinishedMatchRecord(
+            room,
+            state,
+            completedAtEpochMs,
+        ));
     };
 
-    const persistWithRetry = (room: Room): void => {
-        if (persistenceInFlight.has(room.id)) return;
-        persistenceInFlight.add(room.id);
+    const persistWithRetry = (record: FinishedMatchRecord): void => {
+        if (shuttingDown) return;
+        if (persistenceInFlight.has(record.matchId)) return;
+        persistenceInFlight.add(record.matchId);
+        queuePersistenceAttempt(record, 1);
+    };
 
-        const attempt = (attemptNumber: number): void => {
-            let result: Promise<unknown> | unknown;
-            try {
-                result = persist(room);
-            } catch {
-                handleFailure(attemptNumber);
-                return;
-            }
-            void Promise.resolve(result).then(
-                () => persistenceInFlight.delete(room.id),
-                () => handleFailure(attemptNumber),
-            );
+    const queuePersistenceAttempt = (
+        record: FinishedMatchRecord,
+        attemptNumber: number,
+    ): void => {
+        queuedAttempts.push({ record, attemptNumber });
+        drainPersistenceAttempts();
+    };
+
+    const drainPersistenceAttempts = (): void => {
+        while (
+            !shuttingDown
+            && activePersistenceAttempts < MAX_PERSISTENCE_CONCURRENCY
+            && queuedAttempts.length > 0
+        ) {
+            const queued = queuedAttempts.shift();
+            if (!queued) return;
+            runPersistenceAttempt(queued.record, queued.attemptNumber);
+        }
+    };
+
+    const runPersistenceAttempt = (
+        record: FinishedMatchRecord,
+        attemptNumber: number,
+    ): void => {
+        activePersistenceAttempts += 1;
+        let result: Promise<unknown> | unknown;
+        try {
+            result = persist(record);
+        } catch {
+            handlePersistenceFailure(record, attemptNumber);
+            activePersistenceAttempts -= 1;
+            drainPersistenceWork();
+            return;
+        }
+        let task: Promise<void>;
+        task = Promise.resolve(result).then(
+            (enqueueResult) => {
+                if (!isMatchOutboxEnqueueResult(enqueueResult)) {
+                    handlePersistenceFailure(record, attemptNumber);
+                    return;
+                }
+                persistenceInFlight.delete(record.matchId);
+            },
+            () => handlePersistenceFailure(record, attemptNumber),
+        ).then(() => undefined).finally(() => {
+            activePersistenceAttempts -= 1;
+            persistenceTasks.delete(task);
+            drainPersistenceWork();
+        });
+        persistenceTasks.add(task);
+    };
+
+    const drainPersistenceWork = (): void => {
+        if (shuttingDown) {
+            drainFinalFlushAttempts();
+        } else {
+            drainPersistenceAttempts();
+        }
+    };
+
+    const handlePersistenceFailure = (
+        record: FinishedMatchRecord,
+        attemptNumber: number,
+    ): void => {
+        if (shuttingDown) {
+            startFinalFlush(record);
+            return;
+        }
+        if (attemptNumber === 3 || attemptNumber % 10 === 0) {
+            console.error('Match persistence unavailable; retrying');
+        }
+        let handle: unknown;
+        const retry = (): void => {
+            if (handle !== undefined) scheduledRetries.delete(handle);
+            if (shuttingDown) return;
+            queuePersistenceAttempt(record, attemptNumber + 1);
         };
+        handle = schedulePersistenceRetry(
+            retry,
+            persistenceRetryDelay(attemptNumber, random()),
+        );
+        if (handle !== undefined) {
+            scheduledRetries.set(handle, {
+                record,
+                attemptNumber: attemptNumber + 1,
+            });
+        }
+    };
 
-        const handleFailure = (attemptNumber: number): void => {
-            if (attemptNumber === 3 || attemptNumber % 10 === 0) {
-                console.error('Match persistence unavailable; retrying');
-            }
-            schedulePersistenceRetry(
-                () => attempt(attemptNumber + 1),
-                Math.min(
-                    attemptNumber * 1_000,
-                    MAX_PERSISTENCE_RETRY_DELAY_MS,
-                ),
-            );
-        };
+    const startFinalFlush = (record: FinishedMatchRecord): void => {
+        if (!finalFlushAttempted.add(record.matchId)) return;
+        finalFlushQueue.push(record);
+        drainFinalFlushAttempts();
+    };
 
-        attempt(1);
+    const drainFinalFlushAttempts = (): void => {
+        while (
+            shuttingDown
+            && activePersistenceAttempts < MAX_PERSISTENCE_CONCURRENCY
+            && finalFlushQueue.length > 0
+        ) {
+            const record = finalFlushQueue.shift();
+            if (!record) return;
+            runFinalFlushAttempt(record);
+        }
+    };
+
+    const runFinalFlushAttempt = (record: FinishedMatchRecord): void => {
+        activePersistenceAttempts += 1;
+        let task: Promise<void>;
+        task = Promise.resolve()
+            .then(() => persist(record))
+            .then(
+                (enqueueResult) => {
+                    if (!isMatchOutboxEnqueueResult(enqueueResult)) {
+                        finalFlushFailures += 1;
+                    }
+                },
+                () => {
+                    finalFlushFailures += 1;
+                },
+            )
+            .finally(() => {
+                activePersistenceAttempts -= 1;
+                persistenceInFlight.delete(record.matchId);
+                persistenceTasks.delete(task);
+                drainFinalFlushAttempts();
+            });
+        persistenceTasks.add(task);
+    };
+
+    const finishShutdown = async (): Promise<void> => {
+        drainFinalFlushAttempts();
+        while (persistenceTasks.size > 0 || finalFlushQueue.length > 0) {
+            await Promise.allSettled([...persistenceTasks]);
+            drainFinalFlushAttempts();
+        }
+        if (finalFlushFailures > 0) {
+            throw new Error('match_persistence_final_flush_failed');
+        }
     };
 
     manager.on('game_finished', (event) => {
@@ -202,6 +364,24 @@ export const createSocketGateway = (
             completeGame,
         );
     });
+
+    return {
+        shutdown: () => {
+            if (!shutdownPromise) {
+                shuttingDown = true;
+                for (const [handle, retry] of scheduledRetries) {
+                    cancelPersistenceRetry(handle);
+                    startFinalFlush(retry.record);
+                }
+                scheduledRetries.clear();
+                for (const queued of queuedAttempts.splice(0)) {
+                    startFinalFlush(queued.record);
+                }
+                shutdownPromise = finishShutdown();
+            }
+            return shutdownPromise;
+        },
+    };
 };
 
 const handleSocketConnection = (
@@ -586,23 +766,4 @@ const notifyOpponent = (
             ? { reconnectDeadlineEpochMs }
             : {}),
     });
-};
-
-const persistFinishedRoom = async (room: Room): Promise<void> => {
-    const { winner, endReason } = room.gameState;
-    if (winner == null || endReason == null) {
-        throw new Error('finished_match_result_missing');
-    }
-    const saved = await dbService.saveMatchResult({
-        matchId: room.id,
-        protocolVersion: PROTOCOL_VERSION,
-        player1Id: room.players[0].id,
-        player2Id: room.players[1].id,
-        winner,
-        startingPlayer: room.startingPlayer,
-        endReason,
-        revision: room.gameState.revision,
-        moves: room.gameState.moveHistory,
-    });
-    if (!saved) throw new Error('match_persistence_failed');
 };
