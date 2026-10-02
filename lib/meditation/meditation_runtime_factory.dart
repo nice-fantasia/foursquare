@@ -1,5 +1,5 @@
 import '../ai/ai_player.dart';
-import '../ai/minimax_ai.dart';
+import '../ai/background_ai.dart';
 import '../models/piece_type.dart';
 import '../services/storage_service.dart';
 import 'meditation_session_committer.dart';
@@ -34,7 +34,7 @@ final class MeditationRuntimeFactory {
     return MeditationRuntimeFactory(
       repositoryFactory: () async =>
           storage.createMeditationSessionRepository(),
-      aiFactory: MinimaxAI.new,
+      aiFactory: BackgroundAI.new,
       archiveCompletedGame: storage.recordCompletedGame,
     );
   }

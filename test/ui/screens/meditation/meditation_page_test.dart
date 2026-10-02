@@ -304,7 +304,10 @@ final class _SingleMoveAI extends AIPlayer {
   _SingleMoveAI() : super(AIDifficulty.easy);
 
   @override
-  Future<AIMoveResult?> selectMove(BoardState board) async {
+  Future<AIMoveResult?> selectMove(
+    BoardState board, {
+    int noCapturePlyCount = 0,
+  }) async {
     return const AIMoveResult(
       from: Position(0, 3),
       to: Position(0, 2),

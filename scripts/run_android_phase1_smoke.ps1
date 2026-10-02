@@ -53,13 +53,14 @@ if ($isEmulator -ne '1' -or $actualAvdName -ne $AvdName) {
     throw "Refusing destructive smoke test: '$DeviceId' is '$actualAvdName' (qemu=$isEmulator), expected AVD '$AvdName'."
 }
 
+$originalNoProxy = $env:NO_PROXY
 $env:NO_PROXY = (@($env:NO_PROXY, 'localhost', '127.0.0.1', '::1') |
     Where-Object { $_ } |
     ForEach-Object { $_.Trim(',') }) -join ','
 
 Push-Location $repositoryRoot
 try {
-    & flutter test integration_test/android_phase1_smoke_test.dart `
+    & flutter test --no-pub integration_test/android_phase1_smoke_test.dart `
         -d $DeviceId `
         "--dart-define=ANDROID_SMOKE_DEVICE=$AvdName" `
         --timeout 10m `
@@ -68,5 +69,6 @@ try {
         throw "Android Phase 1 smoke test failed with exit code $LASTEXITCODE."
     }
 } finally {
+    $env:NO_PROXY = $originalNoProxy
     Pop-Location
 }

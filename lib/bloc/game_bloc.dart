@@ -30,7 +30,7 @@ import '../services/turn_clock.dart';
 import '../services/logger_service.dart';
 import '../services/game_replay_service.dart';
 import '../ai/ai_player.dart';
-import '../ai/minimax_ai.dart';
+import '../ai/background_ai.dart';
 import 'game_event.dart';
 import 'game_state.dart';
 import 'dart:math' as math;
@@ -45,6 +45,8 @@ class GameBloc extends Bloc<GameEvent, GameState> {
   final PieceType Function() _startingPlayerPicker;
   final PieceType Function() _humanPlayerPicker;
   Timer? _turnTicker;
+  final AIPlayer Function(AIDifficulty) _aiFactory;
+  int _aiGeneration = 0;
 
   GameBloc({
     GameEngine? gameEngine,
@@ -54,11 +56,13 @@ class GameBloc extends Bloc<GameEvent, GameState> {
     DateTime Function()? now,
     PieceType Function()? startingPlayerPicker,
     PieceType Function()? humanPlayerPicker,
+    AIPlayer Function(AIDifficulty)? aiFactory,
   })  : _gameEngine = gameEngine ?? GameEngine(),
         _moveValidator = moveValidator ?? MoveValidator(),
         _audioCoordinator = audioCoordinator ?? audio.AudioCoordinator(),
         _storageService = storageService ?? StorageService(),
         _now = now ?? DateTime.now,
+        _aiFactory = aiFactory ?? BackgroundAI.new,
         _startingPlayerPicker = startingPlayerPicker ??
             (() =>
                 math.Random().nextBool() ? PieceType.black : PieceType.white),
@@ -88,6 +92,7 @@ class GameBloc extends Bloc<GameEvent, GameState> {
 
   /// 处理新游戏事件
   Future<void> _onNewGame(NewGameEvent event, Emitter<GameState> emit) async {
+    _aiGeneration++;
     _audioCoordinator.onGameEvent(audio.GameEvent.buttonClicked);
     await _storageService.deleteGameSave();
 
@@ -133,6 +138,7 @@ class GameBloc extends Bloc<GameEvent, GameState> {
     RestartGameEvent event,
     Emitter<GameState> emit,
   ) async {
+    _aiGeneration++;
     _audioCoordinator.onGameEvent(audio.GameEvent.buttonClicked);
     await _storageService.deleteGameSave();
 
@@ -489,84 +495,99 @@ class GameBloc extends Bloc<GameEvent, GameState> {
     await _persistGame(nextPlaying);
   }
 
-  /// 处理AI移动事件
+  /// Search asynchronously; accept a result only for the still-active turn.
   Future<void> _onAIPlay(AIPlayEvent event, Emitter<GameState> emit) async {
     if (state is! GamePlaying) return;
     final playing = state as GamePlaying;
-
-    if (playing.mode != GameMode.pve || !playing.isAITurn) {
+    if (playing.mode != GameMode.pve ||
+        !playing.isAITurn ||
+        playing.isAIThinking ||
+        playing.turnClock?.isPaused == true) {
       return;
     }
-
-    // 标记AI正在思考
+    final generation = ++_aiGeneration;
     emit(
       playing.copyWith(
         isAIThinking: true,
-        aiThinkingProgress: 0.0,
-        aiThinkingStatus: '初始化...',
+        aiThinkingProgress: 0,
+        aiThinkingStatus: '思考中…',
       ),
     );
-
-    // 创建AI实例
     _audioCoordinator.onGameEvent(audio.GameEvent.aiThinking);
 
-    final aiDifficulty =
+    final difficulty =
         AIDifficulty.fromString(playing.aiDifficulty ?? 'medium');
-    final ai = MinimaxAI(aiDifficulty);
-
-    // 设置进度回调
-    ai.setProgressCallback((progress, status) {
-      if (state is GamePlaying) {
-        emit(
-          (state as GamePlaying).copyWith(
-            isAIThinking: true,
-            aiThinkingProgress: progress,
-            aiThinkingStatus: status,
-          ),
-        );
-      }
-    });
-
-    // AI思考
-    final aiMove = await ai.selectMove(playing.boardState);
-
-    if (aiMove == null) {
-      final winner = playing.currentPlayer.getOpponent();
-      final result = GameResult(
-        status: winner == PieceType.black
-            ? GameStatus.blackWin
-            : GameStatus.whiteWin,
-        winner: winner,
-        reason: '${playing.currentPlayer.getDisplayName()}无合法移动',
-        endReason: GameEndReason.noLegalMoves,
-        moveCount: playing.moveHistory.length,
-        duration: _elapsedDuration(playing),
+    final AIMoveResult? move;
+    try {
+      move = await _aiFactory(difficulty).selectMove(
+        playing.boardState,
+        noCapturePlyCount: playing.noCapturePlyCount,
       );
-      await _updateStatistics(result, playing.moveHistory, playing);
-      await _archiveCompletedGame(result, playing.moveHistory, playing);
-      emit(GameOver.fromPlaying(playing, result));
+    } catch (error) {
+      if (!_isActiveAi(generation, playing, emit)) return;
+      logger.error('AI search failed', 'GameBloc', error);
+      emit(
+        (state as GamePlaying).copyWith(
+          isAIThinking: false,
+          aiThinkingProgress: 0,
+          aiThinkingStatus: '',
+        ),
+      );
+      return;
+    }
+    if (!_isActiveAi(generation, playing, emit)) return;
+    final current = state as GamePlaying;
+    emit(
+      current.copyWith(
+        isAIThinking: false,
+        aiThinkingProgress: 0,
+        aiThinkingStatus: '',
+      ),
+    );
+    if (move == null) {
+      final result = _restoredTerminalResult(
+        current.boardState,
+        noCapturePlyCount: current.noCapturePlyCount,
+      );
+      if (result == null) return;
+      await _updateStatistics(result, current.moveHistory, current);
+      await _archiveCompletedGame(result, current.moveHistory, current);
+      if (!_isActiveAi(generation, playing, emit)) return;
+      emit(GameOver.fromPlaying(current, result));
       _turnTicker?.cancel();
       await _storageService.deleteGameSave();
       return;
     }
-
-    // 取消AI思考标记
-    emit(
-      playing.copyWith(
-        isAIThinking: false,
-        aiThinkingProgress: 0.0,
-        aiThinkingStatus: '',
-      ),
-    );
-
-    // 执行AI移动
-    add(
+    // Commit synchronously through the same authoritative move handler.
+    // Queuing a new event here would allow a restart to race with this move.
+    await _onMovePiece(
       MovePieceEvent(
-        from: aiMove.from,
-        to: aiMove.to,
+        from: move.from,
+        to: move.to,
         isAIMove: true,
       ),
+      emit,
     );
+  }
+
+  bool _isActiveAi(
+    int generation,
+    GamePlaying expected,
+    Emitter<GameState> emit,
+  ) {
+    if (isClosed ||
+        emit.isDone ||
+        generation != _aiGeneration ||
+        state is! GamePlaying) {
+      return false;
+    }
+    final current = state as GamePlaying;
+    return current.mode == GameMode.pve &&
+        current.isAITurn &&
+        current.turnClock?.isPaused != true &&
+        current.matchId == expected.matchId &&
+        current.boardState == expected.boardState &&
+        current.moveHistory.length == expected.moveHistory.length;
   }
 
   /// 处理保存游戏事件
@@ -587,6 +608,7 @@ class GameBloc extends Bloc<GameEvent, GameState> {
 
   /// 处理加载游戏事件
   Future<void> _onLoadGame(LoadGameEvent event, Emitter<GameState> emit) async {
+    _aiGeneration++;
     try {
       final gameSave = await _storageService.loadGame();
       if (gameSave == null) {
@@ -685,6 +707,7 @@ class GameBloc extends Bloc<GameEvent, GameState> {
     GamePlaying playing,
     Emitter<GameState> emit,
   ) async {
+    _aiGeneration++;
     final result = GameResult.timeout(
       timeoutPlayer: playing.currentPlayer,
       moveCount: playing.moveHistory.length,
@@ -727,7 +750,13 @@ class GameBloc extends Bloc<GameEvent, GameState> {
     final clock = playing.turnClock;
     if (clock == null || clock.isPaused) return;
 
-    final paused = playing.copyWith(turnClock: clock.pause(event.now));
+    _aiGeneration++;
+    final paused = playing.copyWith(
+      turnClock: clock.pause(event.now),
+      isAIThinking: false,
+      aiThinkingProgress: 0,
+      aiThinkingStatus: '',
+    );
     emit(paused);
     await _persistGame(paused);
   }
@@ -744,6 +773,9 @@ class GameBloc extends Bloc<GameEvent, GameState> {
     final resumed = playing.copyWith(turnClock: clock.resume(event.now));
     emit(resumed);
     await _persistGame(resumed);
+    if (!isClosed && state == resumed && resumed.isAITurn) {
+      add(const AIPlayEvent());
+    }
   }
 
   ({BoardState boardState, int noCapturePlyCount}) _rebuildFromHistory(
@@ -813,6 +845,7 @@ class GameBloc extends Bloc<GameEvent, GameState> {
 
   @override
   Future<void> close() {
+    _aiGeneration++;
     _turnTicker?.cancel();
     return super.close();
   }

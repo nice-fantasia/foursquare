@@ -97,37 +97,36 @@ void main() {
     test('无合法移动时应该返回null', () async {
       final ai = MinimaxAI(AIDifficulty.easy);
 
-      // 创建一个白方无子可走的棋盘
+      // Both sides have at least two pieces, but white has no legal move.
       final board = createEmptyBoard(currentPlayer: PieceType.white)
-          .setPiece(const Position(0, 0), PieceType.white) // 白方唯一的棋子
-          .setPiece(const Position(1, 0), PieceType.black) // 被黑方包围
-          .setPiece(const Position(0, 1), PieceType.black);
+          .setPiece(const Position(0, 0), PieceType.white)
+          .setPiece(const Position(1, 0), PieceType.white)
+          .setPiece(const Position(2, 0), PieceType.black)
+          .setPiece(const Position(0, 1), PieceType.black)
+          .setPiece(const Position(1, 1), PieceType.black);
 
       final result = await ai.selectMove(board);
 
-      // 如果白方有其他棋子，可能还能移动，所以这个测试可能需要调整
-      // 这里主要测试AI在无棋可走时的行为
-      expect(result == null || result.from.isValid(), isTrue);
+      expect(result, isNull);
     });
 
     test('应该优先选择吃子移动', () async {
       final ai = MinimaxAI(AIDifficulty.medium);
 
-      // 创建一个可以吃子的棋盘
-      // B . W .
-      // . . . .
-      // . . . .
-      // B . . W
       final board = createEmptyBoard(currentPlayer: PieceType.white)
-          .setPiece(const Position(0, 0), PieceType.black)
-          .setPiece(const Position(2, 0), PieceType.white) // 白方可以向左吃掉黑子
-          .setPiece(const Position(0, 3), PieceType.black)
-          .setPiece(const Position(3, 3), PieceType.white);
+          .setPiece(const Position(0, 0), PieceType.white)
+          .setPiece(const Position(1, 1), PieceType.white)
+          .setPiece(const Position(0, 3), PieceType.white)
+          .setPiece(const Position(2, 0), PieceType.black)
+          .setPiece(const Position(3, 3), PieceType.black);
 
       final result = await ai.selectMove(board);
 
       expect(result, isNotNull);
-      // AI应该倾向于吃子移动，但不是100%保证（因为有评估）
+      expect(
+        GameEngine().executeMove(board, result!.from, result.to).capturedPieces,
+        isNotEmpty,
+      );
     });
   });
 
@@ -211,14 +210,10 @@ void main() {
         final ai = MinimaxAI(
           difficulty,
           random: _NeverRandomBranch(),
+          elapsed: () => Duration.zero,
         );
-        ai.setProgressCallback((progress, status) {
-          final match = RegExp(r'搜索深度 (\d+)/(\d+)').firstMatch(status);
-          if (match != null) {
-            reachedDepths[difficulty] = int.parse(match.group(2)!);
-          }
-        });
-        await ai.selectMove(BoardState.initial().switchPlayer());
+        final result = await ai.selectMove(BoardState.initial().switchPlayer());
+        reachedDepths[difficulty] = result!.completedDepth;
       }
 
       expect(
@@ -397,14 +392,9 @@ void main() {
       );
     });
 
-    test('应该能阻止对手获胜', () async {
+    test('仅剩一子的终局不再返回移动', () async {
       final ai = MinimaxAI(AIDifficulty.medium);
 
-      // 创建一个黑方即将获胜的棋盘，白方必须阻止
-      // B B B . (黑方3连，白方必须阻止)
-      // . . . .
-      // . . . .
-      // . . . W
       final board = createEmptyBoard(currentPlayer: PieceType.white)
           .setPiece(const Position(0, 0), PieceType.black)
           .setPiece(const Position(1, 0), PieceType.black)
@@ -413,9 +403,7 @@ void main() {
 
       final result = await ai.selectMove(board);
 
-      expect(result, isNotNull);
-      // AI应该找到阻止对手的移动
-      // 但由于棋盘状态复杂，这里主要验证返回了合法移动
+      expect(result, isNull);
     });
   });
 

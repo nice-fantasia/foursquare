@@ -35,6 +35,7 @@ class MinimaxAI extends AIPlayer {
   final GameEngine _engine = GameEngine();
   final int _baseDepth;
   final Random _random;
+  final Duration Function()? _elapsed;
 
   // 置换表（缓存已评估的局面）
   final Map<String, _TranspositionEntry> _transpositionTable = {};
@@ -49,8 +50,9 @@ class MinimaxAI extends AIPlayer {
   // AI思考进度回调
   Function(double progress, String status)? _progressCallback;
 
-  MinimaxAI(super.difficulty, {Random? random})
+  MinimaxAI(super.difficulty, {Random? random, Duration Function()? elapsed})
       : _baseDepth = _getDepthForDifficulty(difficulty),
+        _elapsed = elapsed,
         _random = random ?? Random();
 
   /// 设置进度回调
@@ -111,7 +113,11 @@ class MinimaxAI extends AIPlayer {
   }
 
   /// 生成棋盘哈希值（用于置换表）
-  String _getBoardHash(BoardState board, PieceType aiPlayer) {
+  String _getBoardHash(
+    BoardState board,
+    PieceType aiPlayer,
+    int noCapturePlyCount,
+  ) {
     final buffer = StringBuffer();
     for (int y = 0; y < 4; y++) {
       for (int x = 0; x < 4; x++) {
@@ -127,6 +133,7 @@ class MinimaxAI extends AIPlayer {
     }
     buffer.write(board.currentPlayer == PieceType.black ? 'B' : 'W');
     buffer.write(aiPlayer == PieceType.black ? 'B' : 'W');
+    buffer.write(':$noCapturePlyCount');
     return buffer.toString();
   }
 
@@ -172,7 +179,17 @@ class MinimaxAI extends AIPlayer {
   }
 
   @override
-  Future<AIMoveResult?> selectMove(BoardState board) async {
+  Future<AIMoveResult?> selectMove(
+    BoardState board, {
+    int noCapturePlyCount = 0,
+  }) async {
+    if (noCapturePlyCount < 0 || noCapturePlyCount > 50) {
+      throw RangeError.range(noCapturePlyCount, 0, 50, 'noCapturePlyCount');
+    }
+    if (_engine.checkGameOver(board, noCapturePlyCount: noCapturePlyCount) !=
+        null) {
+      return null;
+    }
     final stopwatch = Stopwatch()..start();
     _nodesEvaluated = 0;
 
@@ -205,13 +222,16 @@ class MinimaxAI extends AIPlayer {
 
     Position? bestFrom = sortedMoves.first.from;
     Position? bestTo = sortedMoves.first.to;
-    int bestScore = -9999999;
+    int bestScore = BoardEvaluator.evaluate(board, board.currentPlayer);
     var completedScores = <_ScoredMove>[];
+    var completedDepth = 0;
+    var timedOut = false;
 
     // 迭代加深搜索（从深度1开始，逐步增加）
     for (int depth = 1; depth <= maxDepth; depth++) {
       // 检查是否超时
-      if (stopwatch.elapsedMilliseconds >= timeLimit) {
+      if (_elapsedTime.inMilliseconds >= timeLimit) {
+        timedOut = true;
         break;
       }
 
@@ -239,6 +259,7 @@ class MinimaxAI extends AIPlayer {
             9999999,
             false,
             board.currentPlayer,
+            _nextNoCaptureCount(board, nextBoard, noCapturePlyCount),
           );
           iterationScores.add(_ScoredMove(move, score));
 
@@ -255,6 +276,7 @@ class MinimaxAI extends AIPlayer {
           }
         }
       } on _SearchTimeout {
+        timedOut = true;
         break;
       }
 
@@ -263,6 +285,7 @@ class MinimaxAI extends AIPlayer {
         bestFrom = iterationBestFrom;
         bestTo = iterationBestTo;
         completedScores = iterationScores;
+        completedDepth = depth;
       }
     }
 
@@ -297,6 +320,8 @@ class MinimaxAI extends AIPlayer {
       score: bestScore,
       nodesEvaluated: _nodesEvaluated,
       thinkingTime: stopwatch.elapsed,
+      completedDepth: completedDepth,
+      timedOut: timedOut,
     );
   }
 
@@ -307,19 +332,23 @@ class MinimaxAI extends AIPlayer {
     int beta,
     bool isMaximizing,
     PieceType aiPlayer,
+    int noCapturePlyCount,
   ) {
     _checkDeadline();
     _nodesEvaluated++;
+    final originalAlpha = alpha;
+    final originalBeta = beta;
 
     // 检查置换表
-    final boardHash = _getBoardHash(board, aiPlayer);
+    final boardHash = _getBoardHash(board, aiPlayer, noCapturePlyCount);
     final cached = _transpositionTable[boardHash];
-    if (cached != null && cached.depth >= depth) {
+    if (cached != null && cached.depth == depth) {
       return cached.score;
     }
 
     // 检查游戏结束
-    final gameResult = _engine.checkGameOver(board);
+    final gameResult =
+        _engine.checkGameOver(board, noCapturePlyCount: noCapturePlyCount);
     if (gameResult != null) {
       final score = gameResult.winner == aiPlayer
           ? 10000 // AI获胜
@@ -381,6 +410,7 @@ class MinimaxAI extends AIPlayer {
           beta,
           false,
           aiPlayer,
+          _nextNoCaptureCount(board, nextBoard, noCapturePlyCount),
         );
         maxScore = max(maxScore, score);
         alpha = max(alpha, score);
@@ -403,6 +433,7 @@ class MinimaxAI extends AIPlayer {
           beta,
           true,
           aiPlayer,
+          _nextNoCaptureCount(board, nextBoard, noCapturePlyCount),
         );
         minScore = min(minScore, score);
         beta = min(beta, score);
@@ -415,7 +446,11 @@ class MinimaxAI extends AIPlayer {
     }
 
     // 存入置换表
-    if (!searchWasCutOff) {
+    // A node that did not cut off can still be a fail-low/high bound.
+    // Only scores strictly inside its original window are exact.
+    if (!searchWasCutOff &&
+        finalScore > originalAlpha &&
+        finalScore < originalBeta) {
       _transpositionTable[boardHash] = _TranspositionEntry(
         finalScore,
         depth,
@@ -426,12 +461,18 @@ class MinimaxAI extends AIPlayer {
   }
 
   void _checkDeadline() {
-    final stopwatch = _searchStopwatch;
-    if (stopwatch != null &&
-        stopwatch.elapsedMilliseconds >= _timeLimitMilliseconds) {
+    if (_elapsedTime.inMilliseconds >= _timeLimitMilliseconds) {
       throw const _SearchTimeout();
     }
   }
+
+  Duration get _elapsedTime => _elapsed?.call() ?? _searchStopwatch!.elapsed;
+
+  int _nextNoCaptureCount(BoardState before, BoardState after, int previous) =>
+      before.blackPieces.length + before.whitePieces.length >
+              after.blackPieces.length + after.whitePieces.length
+          ? 0
+          : previous + 1;
 }
 
 /// 移动选项内部类

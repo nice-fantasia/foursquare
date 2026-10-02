@@ -1,12 +1,18 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
+import 'package:flutter/scheduler.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:foursquare/main.dart' as app;
+import 'package:foursquare/bloc/game_bloc.dart';
+import 'package:foursquare/bloc/game_state.dart';
+import 'package:foursquare/models/piece_type.dart';
 import 'package:foursquare/models/audio_settings.dart';
 import 'package:foursquare/services/storage_service.dart';
 import 'package:foursquare/ui/screens/game_page.dart';
@@ -21,7 +27,7 @@ const _authorizedSmokeDevice = String.fromEnvironment(
 );
 
 void main() {
-  IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
   testWidgets('Android Phase 1 main flow survives real app composition', (
     tester,
@@ -101,10 +107,15 @@ void main() {
     await tester.tap(legalDestination);
     await _pumpUntilFound(tester, find.text('移动历史（1 手）'));
 
+    debugPrint('ANDROID_SMOKE_STAGE=pvp-lifecycle-pause');
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
-    await tester.pump(const Duration(milliseconds: 300));
+    // A paused live binding does not schedule frames; pumping here can hang.
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 300)),
+    );
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     await tester.pump(const Duration(milliseconds: 300));
+    debugPrint('ANDROID_SMOKE_STAGE=pvp-lifecycle-resumed');
     expect(find.text('移动历史（1 手）'), findsOneWidget);
 
     await _goBack(tester);
@@ -121,19 +132,125 @@ void main() {
     await _goBack(tester);
     await _pumpUntilFound(tester, find.byType(HomePage));
 
-    await _tapWhenVisible(
-      tester,
-      find.bySemanticsLabel(RegExp(r'^人机对战，')),
+    final frameTimings = <FrameTiming>[];
+    void collectTimings(List<FrameTiming> timings) =>
+        frameTimings.addAll(timings);
+    SchedulerBinding.instance.addTimingsCallback(collectTimings);
+    addTearDown(
+      () => SchedulerBinding.instance.removeTimingsCallback(collectTimings),
     );
-    await _pumpUntilFound(tester, find.byType(AlertDialog));
-    await _tapWhenVisible(tester, find.text('简单'));
-    await _pumpUntilFound(tester, find.byType(GamePageView));
-    await _pumpUntilFound(tester, find.byType(ThemedBoardWidget));
-    expect(find.byKey(const Key('game-voice-panel')), findsNothing);
-    await tester.pump(const Duration(seconds: 2));
-    await _goBack(tester);
-    await _pumpUntilFound(tester, find.byType(HomePage));
+    for (final difficulty in ['简单', '中等', '困难']) {
+      debugPrint('ANDROID_SMOKE_STAGE=pve-$difficulty');
+      await _tapWhenVisible(tester, find.bySemanticsLabel(RegExp(r'^人机对战，')));
+      await _pumpUntilFound(tester, find.byType(AlertDialog));
+      await _tapWhenVisible(tester, find.text(difficulty));
+      await _pumpUntilFound(tester, find.byType(GamePageView));
+      final bloc = tester.element(find.byType(GamePageView)).read<GameBloc>();
+      await _waitForHumanTurn(tester, bloc);
+      final before = bloc.state as GamePlaying;
+      await _playLegalHumanMove(tester);
+      await _waitForHumanTurn(
+        tester,
+        bloc,
+        minimumMoves: before.moveHistory.length + 2,
+      );
+      final after = bloc.state as GamePlaying;
+      expect(after.moveHistory.length, before.moveHistory.length + 2);
+      expect(
+        after.moveHistory[before.moveHistory.length].player,
+        after.humanPlayer,
+      );
+      expect(after.moveHistory.last.player, after.humanPlayer!.getOpponent());
+      expect(find.byKey(const Key('game-voice-panel')), findsNothing);
+      await tester.pump(const Duration(milliseconds: 300));
+      final saved = await storage.loadGame();
+      expect(saved, isNotNull);
+      expect(saved!.aiDifficulty, after.aiDifficulty);
+      expect(saved.moveHistory.length, after.moveHistory.length);
+      expect(
+        saved.boardState.toBoardState(after.currentPlayer),
+        after.boardState,
+      );
+      expect(saved.noCapturePlyCount, after.noCapturePlyCount);
+      await _goBack(tester);
+      await _pumpUntilFound(
+        tester,
+        find.byKey(const Key('continue_game_button')),
+      );
+      await _tapWhenVisible(
+        tester,
+        find.byKey(const Key('continue_game_button')),
+      );
+      await _pumpUntilFound(tester, find.byType(GamePageView));
+      final restoredBloc =
+          tester.element(find.byType(GamePageView)).read<GameBloc>();
+      await _waitForHumanTurn(
+        tester,
+        restoredBloc,
+        minimumMoves: after.moveHistory.length,
+      );
+      expect(restoredBloc.state.boardState, after.boardState);
+      expect(restoredBloc.state.humanPlayer, after.humanPlayer);
+      expect(restoredBloc.state.aiDifficulty, after.aiDifficulty);
+      await _goBack(tester);
+      await _pumpUntilFound(tester, find.byType(HomePage));
+    }
+    await tester.pump(const Duration(seconds: 1));
+    final timingData = <String, dynamic>{
+      'source': 'Flutter FrameTiming',
+      'scope': 'three difficulty PVE smoke, animations disabled',
+      'buildMode': kProfileMode
+          ? 'profile'
+          : kReleaseMode
+              ? 'release'
+              : 'debug',
+      'frames': frameTimings.length,
+      'buildMicros': frameTimings
+          .map((frame) => frame.buildDuration.inMicroseconds)
+          .toList(),
+      'rasterMicros': frameTimings
+          .map((frame) => frame.rasterDuration.inMicroseconds)
+          .toList(),
+      'releasePerformanceVerdict': 'not assessed by functional smoke',
+    };
+    binding.reportData = {'flutterFrameTiming': timingData};
+    debugPrint('FOURSQUARE_FRAME_TIMING=${jsonEncode(timingData)}');
   });
+}
+
+Future<void> _waitForHumanTurn(
+  WidgetTester tester,
+  GameBloc bloc, {
+  int minimumMoves = 0,
+}) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 20));
+  while (DateTime.now().isBefore(deadline)) {
+    final state = bloc.state;
+    if (state is GamePlaying &&
+        !state.isAITurn &&
+        !state.isAIThinking &&
+        state.moveHistory.length >= minimumMoves) {
+      return;
+    }
+    await tester.pump(const Duration(milliseconds: 100));
+  }
+  fail('AI did not return the turn to the human');
+}
+
+Future<void> _playLegalHumanMove(WidgetTester tester) async {
+  final pieces = find.bySemanticsLabel(RegExp('可选棋子'));
+  final count = pieces.evaluate().length;
+  for (var index = 0; index < count; index++) {
+    await tester.tap(pieces.at(index));
+    await tester.pump(const Duration(milliseconds: 100));
+    final destinations = find.bySemanticsLabel(RegExp('可移动到此处'));
+    if (destinations.evaluate().isNotEmpty) {
+      await tester.tap(destinations.first);
+      await tester.pump(const Duration(milliseconds: 100));
+      return;
+    }
+  }
+  fail('Human turn had no legal move in the opening');
 }
 
 Future<StorageService> _prepareCleanAppData() async {

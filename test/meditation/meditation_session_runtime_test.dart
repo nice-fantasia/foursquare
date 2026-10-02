@@ -425,7 +425,10 @@ final class _SingleMoveAI extends AIPlayer {
   _SingleMoveAI() : super(AIDifficulty.easy);
 
   @override
-  Future<AIMoveResult?> selectMove(BoardState board) async {
+  Future<AIMoveResult?> selectMove(
+    BoardState board, {
+    int noCapturePlyCount = 0,
+  }) async {
     return const AIMoveResult(
       from: Position(0, 3),
       to: Position(0, 2),
@@ -444,7 +447,10 @@ final class _FailIfCalledAI extends AIPlayer {
   _FailIfCalledAI() : super(AIDifficulty.easy);
 
   @override
-  Future<AIMoveResult?> selectMove(BoardState board) {
+  Future<AIMoveResult?> selectMove(
+    BoardState board, {
+    int noCapturePlyCount = 0,
+  }) {
     throw StateError('AI must not run for restored timeout');
   }
 
@@ -459,7 +465,10 @@ final class _HardFailIfCalledAI extends AIPlayer {
   _HardFailIfCalledAI() : super(AIDifficulty.hard);
 
   @override
-  Future<AIMoveResult?> selectMove(BoardState board) {
+  Future<AIMoveResult?> selectMove(
+    BoardState board, {
+    int noCapturePlyCount = 0,
+  }) {
     throw StateError('Mismatched AI must not run');
   }
 
@@ -479,7 +488,10 @@ final class _DelayedAI extends AIPlayer {
   void complete(AIMoveResult result) => _move.complete(result);
 
   @override
-  Future<AIMoveResult?> selectMove(BoardState board) {
+  Future<AIMoveResult?> selectMove(
+    BoardState board, {
+    int noCapturePlyCount = 0,
+  }) {
     calls += 1;
     return _move.future;
   }

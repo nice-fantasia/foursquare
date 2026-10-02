@@ -81,7 +81,13 @@ class LanLobbyBloc extends Bloc<LanLobbyEvent, LanLobbyState> {
   ) async {
     await _servicesSubscription?.cancel();
     await _networkService.stop();
-    // State update will be handled by connection stream
+    emit(
+      state.copyWith(
+        status: LanLobbyStatus.initial,
+        foundServices: const [],
+        clearFailure: true,
+      ),
+    );
   }
 
   Future<void> _onStartHosting(

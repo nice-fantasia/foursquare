@@ -483,7 +483,11 @@ class _FakeAI extends AIPlayer {
   }
 
   @override
-  Future<AIMoveResult?> selectMove(BoardState board) => _result.future;
+  Future<AIMoveResult?> selectMove(
+    BoardState board, {
+    int noCapturePlyCount = 0,
+  }) =>
+      _result.future;
 
   @override
   String get name => 'Fake AI';

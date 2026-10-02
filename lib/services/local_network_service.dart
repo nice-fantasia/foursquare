@@ -138,6 +138,7 @@ class LocalNetworkService {
     } catch (e) {
       logger.error('Failed to start discovery', 'LocalNetworkService', e);
       _updateConnectionState(LocalNetworkConnectionState.disconnected);
+      rethrow;
     }
   }
 

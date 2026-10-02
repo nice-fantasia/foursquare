@@ -246,7 +246,10 @@ final class MeditationSessionController {
     final expectedRevision = _session.revision;
     final AIMoveResult? move;
     try {
-      move = await aiPlayer.selectMove(_session.boardState);
+      move = await aiPlayer.selectMove(
+        _session.boardState,
+        noCapturePlyCount: _session.noCapturePlyCount,
+      );
     } catch (_) {
       if (_session.revision != expectedRevision) {
         return _rejected(MeditationRejection.staleRevision);

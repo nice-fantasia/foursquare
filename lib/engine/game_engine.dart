@@ -182,17 +182,10 @@ class GameEngine {
     _moveHistory.add(move);
 
     // 6. 检查游戏是否结束
-    var gameResult = checkGameOver(newBoard);
-
-    // 棋子数胜负优先于连续未吃子和棋。
-    if (gameResult == null && nextNoCapturePlyCount >= 50) {
-      gameResult = GameResult.draw(
-        reason: '连续50手未发生吃子',
-        endReason: GameEndReason.noCaptureLimit,
-        moveCount: _moveHistory.length,
-        duration: gameDuration,
-      );
-    }
+    var gameResult = checkGameOver(
+      newBoard,
+      noCapturePlyCount: nextNoCapturePlyCount,
+    );
 
     // 7. 棋子数量未触发终局时，先切换到下一方，再判断其是否有路可走。
     if (gameResult == null) {
@@ -214,9 +207,8 @@ class GameEngine {
   /// 检查游戏是否结束
   ///
   /// 判定规则：
-  /// - 某方棋子数 == 0：对方获胜
-  /// - 某方无合法移动：对方获胜（可选规则）
-  GameResult? checkGameOver(BoardState board) {
+  /// 棋子数判负优先，其次是 50 ply 和棋，最后是当前方无合法移动。
+  GameResult? checkGameOver(BoardState board, {int noCapturePlyCount = 0}) {
     final blackCount = board.getPieceCount(PieceType.black);
     final whiteCount = board.getPieceCount(PieceType.white);
 
@@ -236,6 +228,15 @@ class GameEngine {
     if (whiteCount <= 1) {
       return GameResult.blackWin(
         reason: '白方仅剩一个或更少棋子',
+        moveCount: _moveHistory.length,
+        duration: duration,
+      );
+    }
+
+    if (noCapturePlyCount >= 50) {
+      return GameResult.draw(
+        reason: '连续50手未发生吃子',
+        endReason: GameEndReason.noCaptureLimit,
         moveCount: _moveHistory.length,
         duration: duration,
       );

@@ -143,7 +143,11 @@ final class _NoMoveAI extends AIPlayer {
   _NoMoveAI(super.difficulty);
 
   @override
-  Future<AIMoveResult?> selectMove(BoardState board) async => null;
+  Future<AIMoveResult?> selectMove(
+    BoardState board, {
+    int noCapturePlyCount = 0,
+  }) async =>
+      null;
 
   @override
   String get name => 'No move AI';
