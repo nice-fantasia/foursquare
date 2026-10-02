@@ -130,10 +130,6 @@ class _AnimatedBoardWidgetState extends State<AnimatedBoardWidget>
       vsync: this,
     );
 
-    if (widget.animationEnabled) {
-      _selectionAnimationController?.repeat(reverse: true);
-    }
-
     _selectionPulseAnimation = Tween<double>(
       begin: 1.0,
       end: 1.15,
@@ -143,6 +139,18 @@ class _AnimatedBoardWidgetState extends State<AnimatedBoardWidget>
         curve: Curves.easeInOut,
       ),
     );
+    _syncSelectionPulse();
+  }
+
+  void _syncSelectionPulse() {
+    final controller = _selectionAnimationController;
+    if (controller == null) return;
+    if (widget.animationEnabled && widget.selectedPiece != null) {
+      if (!controller.isAnimating) controller.repeat(reverse: true);
+    } else {
+      controller.stop();
+      if (controller.value != 0) controller.reset();
+    }
   }
 
   @override
@@ -151,12 +159,13 @@ class _AnimatedBoardWidgetState extends State<AnimatedBoardWidget>
 
     final lastMoveChanged = widget.lastMoveFrom != oldWidget.lastMoveFrom ||
         widget.lastMoveTo != oldWidget.lastMoveTo;
+    _syncSelectionPulse();
 
     if (oldWidget.animationEnabled != widget.animationEnabled) {
-      if (widget.animationEnabled) {
-        _selectionAnimationController?.repeat(reverse: true);
-      } else {
-        _selectionAnimationController?.stop();
+      if (!widget.animationEnabled) {
+        _moveAnimationController?.stop();
+        _captureAnimationController?.stop();
+        _captureGeneration++;
         setState(() {
           _animatingTo = null;
           _animatingPiece = null;
@@ -351,6 +360,16 @@ class _AnimatedBoardWidgetState extends State<AnimatedBoardWidget>
   }
 
   Widget _buildBasicBoard(double boardSize) {
+    if (widget.animationEnabled && widget.selectedPiece != null) {
+      return AnimatedBuilder(
+        animation: _selectionPulseAnimation!,
+        builder: (_, __) => _buildPaintedBoard(boardSize),
+      );
+    }
+    return _buildPaintedBoard(boardSize);
+  }
+
+  Widget _buildPaintedBoard(double boardSize) {
     return Container(
       decoration: BoxDecoration(
         boxShadow: [

@@ -135,6 +135,77 @@ void main() {
       bloc.close();
     });
 
+    test('late new-game scene initialization cannot replace the newest mode',
+        () async {
+      final entered = Completer<void>();
+      final release = Completer<void>();
+      when(() => audioCoordinator.onSceneChange(audio.GameScene.gameplay))
+          .thenAnswer((_) async {
+        entered.complete();
+        await release.future;
+      });
+      final bloc = GameBloc(
+        gameEngine: GameEngine(),
+        audioCoordinator: audioCoordinator,
+        storageService: storageService,
+        startingPlayerPicker: () => PieceType.black,
+        humanPlayerPicker: () => PieceType.black,
+      );
+      addTearDown(bloc.close);
+      addTearDown(() {
+        if (!release.isCompleted) release.complete();
+      });
+      bloc.add(const NewGameEvent(mode: GameMode.pvp));
+      await entered.future.timeout(const Duration(seconds: 5));
+      final newest = bloc.stream.firstWhere(
+        (state) => state is GamePlaying && state.mode == GameMode.pve,
+      );
+      bloc.add(const NewGameEvent(mode: GameMode.pve, aiDifficulty: 'hard'));
+      final checkpoint = await newest.timeout(const Duration(seconds: 5));
+      release.complete();
+      await pumpEventQueue();
+      expect(bloc.state.mode, GameMode.pve);
+      expect(bloc.state.matchId, checkpoint.matchId);
+      expect(bloc.state.aiDifficulty, 'hard');
+    });
+
+    test('late restart scene initialization cannot replace the newest game',
+        () async {
+      final bloc = GameBloc(
+        gameEngine: GameEngine(),
+        audioCoordinator: audioCoordinator,
+        storageService: storageService,
+        startingPlayerPicker: () => PieceType.black,
+        humanPlayerPicker: () => PieceType.black,
+      );
+      addTearDown(bloc.close);
+      final started = bloc.stream.firstWhere((state) => state is GamePlaying);
+      bloc.add(const NewGameEvent(mode: GameMode.pvp));
+      await started;
+      final entered = Completer<void>();
+      final release = Completer<void>();
+      addTearDown(() {
+        if (!release.isCompleted) release.complete();
+      });
+      when(() => audioCoordinator.onSceneChange(audio.GameScene.gameplay))
+          .thenAnswer((_) async {
+        entered.complete();
+        await release.future;
+      });
+      bloc.add(const RestartGameEvent());
+      await entered.future.timeout(const Duration(seconds: 5));
+      final newest = bloc.stream.firstWhere(
+        (state) => state is GamePlaying && state.mode == GameMode.pve,
+      );
+      bloc.add(const NewGameEvent(mode: GameMode.pve, aiDifficulty: 'hard'));
+      final checkpoint = await newest.timeout(const Duration(seconds: 5));
+      release.complete();
+      await pumpEventQueue();
+      expect(bloc.state.mode, GameMode.pve);
+      expect(bloc.state.matchId, checkpoint.matchId);
+      expect(bloc.state.humanPlayer, PieceType.black);
+    });
+
     test('late AI result cannot overwrite a new game', () async {
       final ai = DeferredAI();
       final bloc = GameBloc(
