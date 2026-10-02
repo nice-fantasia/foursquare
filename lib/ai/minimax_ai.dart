@@ -67,7 +67,7 @@ class MinimaxAI extends AIPlayer {
       case AIDifficulty.medium:
         return 4; // 从med3层提升到4层
       case AIDifficulty.hard:
-        return 6;
+        return 8;
     }
   }
 
@@ -255,7 +255,8 @@ class MinimaxAI extends AIPlayer {
           final score = _minimax(
             nextBoard,
             depth - 1,
-            -9999999,
+            // Easy ranks all candidates; other tiers only need a new best.
+            difficulty == AIDifficulty.easy ? -9999999 : iterationBestScore,
             9999999,
             false,
             board.currentPlayer,

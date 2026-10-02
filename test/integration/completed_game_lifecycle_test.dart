@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive/hive.dart';
 import 'package:mocktail/mocktail.dart';
@@ -15,11 +16,13 @@ import 'package:foursquare/models/game_result.dart';
 import 'package:foursquare/models/game_record.dart';
 import 'package:foursquare/models/move.dart';
 import 'package:foursquare/models/piece_type.dart';
+import 'package:foursquare/models/position.dart';
 import 'package:foursquare/services/audio_coordinator.dart' as audio;
 import 'package:foursquare/services/game_replay_service.dart';
 import 'package:foursquare/services/storage_service.dart';
 import 'package:foursquare/l10n/app_localizations.dart';
 import 'package:foursquare/ui/screens/game_history_page.dart';
+import 'package:foursquare/ui/screens/game_page.dart';
 import 'package:foursquare/ui/screens/game_replay_page.dart';
 import 'package:foursquare/ui/widgets/themed_board_widget.dart';
 
@@ -70,6 +73,130 @@ void main() {
     await directory.delete(recursive: true);
   });
 
+  test('reopening an active save preserves the last move and captures',
+      () async {
+    final fixture = await _naturalGame(PieceType.black);
+    final captureIndex =
+        fixture.moves.indexWhere((move) => move.captureCount > 0);
+    expect(captureIndex, inInclusiveRange(0, fixture.moves.length - 2));
+    final bloc = GameBloc(
+      storageService: storage,
+      audioCoordinator: sound,
+      now: () => DateTime.utc(2026, 10, 2),
+      startingPlayerPicker: () => PieceType.black,
+    );
+    addTearDown(bloc.close);
+    final started = bloc.stream.firstWhere((state) => state is GamePlaying);
+    bloc.add(const NewGameEvent(mode: GameMode.pvp));
+    await started;
+    for (var step = 0; step <= captureIndex; step++) {
+      final moved = bloc.stream
+          .firstWhere((state) => state.moveHistory.length == step + 1);
+      final move = fixture.moves[step];
+      bloc.add(MovePieceEvent(from: move.from, to: move.to));
+      await moved.timeout(const Duration(seconds: 5));
+    }
+    await _waitUntil(
+      () async =>
+          (await storage.loadGame())?.moveHistory.length == captureIndex + 1,
+    );
+    final checkpoint = bloc.state as GamePlaying;
+    await bloc.close();
+    await storage.dispose();
+    statistics = await Hive.openBox<dynamic>('completed-statistics');
+    saves = await Hive.openBox<dynamic>('completed-saves');
+    storage = StorageService.forTesting(
+      statisticsBox: statistics,
+      gameSaveBox: saves,
+    );
+    final restored = GameBloc(storageService: storage, audioCoordinator: sound);
+    addTearDown(restored.close);
+    final loaded = restored.stream.firstWhere((state) => state is GamePlaying);
+    restored.add(const LoadGameEvent());
+    final state = await loaded.timeout(const Duration(seconds: 5));
+    expect(state.lastMove, checkpoint.lastMove);
+    expect(state.lastMove!.capturedPieces, checkpoint.lastMove!.capturedPieces);
+    expect(state.boardState, checkpoint.boardState);
+    expect(state.moveHistory, checkpoint.moveHistory);
+    expect(state.noCapturePlyCount, checkpoint.noCapturePlyCount);
+  });
+
+  test('loading an empty saved history keeps move markers empty', () async {
+    final bloc = GameBloc(
+      storageService: storage,
+      audioCoordinator: sound,
+      startingPlayerPicker: () => PieceType.black,
+    );
+    addTearDown(bloc.close);
+    final started = bloc.stream.firstWhere((state) => state is GamePlaying);
+    bloc.add(const NewGameEvent(mode: GameMode.pvp));
+    await started;
+    bloc.add(const SaveGameEvent());
+    await _waitUntil(storage.hasSavedGame);
+    final loaded = bloc.stream.firstWhere((state) => state is GamePlaying);
+    bloc.add(const LoadGameEvent());
+    await loaded.timeout(const Duration(seconds: 5));
+    expect(bloc.state.lastMove, isNull);
+    expect(bloc.state.moveHistory, isEmpty);
+    expect(bloc.state.boardState, BoardState.initial());
+  });
+
+  testWidgets('continued game renders last move markers through the real page',
+      (tester) async {
+    final semantics = tester.ensureSemantics();
+    try {
+      await tester.runAsync(() async {
+        final original = GameBloc(
+          storageService: storage,
+          audioCoordinator: sound,
+          startingPlayerPicker: () => PieceType.black,
+        );
+        final started =
+            original.stream.firstWhere((state) => state is GamePlaying);
+        original.add(const NewGameEvent(mode: GameMode.pvp));
+        await started;
+        final moved = original.stream
+            .firstWhere((state) => state.moveHistory.length == 1);
+        original.add(
+          const MovePieceEvent(from: Position(0, 0), to: Position(0, 1)),
+        );
+        await moved.timeout(const Duration(seconds: 5));
+        await _waitUntil(
+          () async => (await storage.loadGame())?.moveHistory.length == 1,
+        );
+        await original.close();
+      });
+      final restored = (await tester.runAsync(() async {
+        final bloc = GameBloc(storageService: storage, audioCoordinator: sound);
+        final loaded = bloc.stream.firstWhere((state) => state is GamePlaying);
+        bloc.add(const LoadGameEvent());
+        await loaded.timeout(const Duration(seconds: 5));
+        return bloc;
+      }))!;
+      addTearDown(restored.close);
+      await tester.pumpWidget(
+        MaterialApp(
+          locale: const Locale('zh'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home:
+              BlocProvider.value(value: restored, child: const GamePageView()),
+        ),
+      );
+      await tester.pump();
+      final board =
+          tester.widget<ThemedBoardWidget>(find.byType(ThemedBoardWidget));
+      expect(board.lastMoveFrom, const Position(0, 0));
+      expect(board.lastMoveTo, const Position(0, 1));
+      expect(find.bySemanticsLabel(RegExp('上一手起点')), findsOneWidget);
+      expect(find.bySemanticsLabel(RegExp('上一手终点')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    } finally {
+      semantics.dispose();
+    }
+  });
+
   test(
       'failed completion retains terminal save and recovers once after reopening',
       () async {
@@ -99,6 +226,7 @@ void main() {
               fixture.moves.length,
     );
     expect(bloc.state, isA<GameOver>());
+    final completedLastMove = bloc.state.lastMove;
     expect(await storage.hasSavedGame(), isTrue);
     expect((await storage.loadGame())!.matchId, matchId);
     expect((await storage.loadStatistics()).totalGames, 0);
@@ -118,8 +246,10 @@ void main() {
     addTearDown(restored.close);
     final ended = restored.stream.firstWhere((s) => s is GameOver);
     restored.add(const LoadGameEvent());
+    final restoredTerminal = await ended.timeout(const Duration(seconds: 5));
+    expect(restoredTerminal.lastMove, completedLastMove);
     expect(
-      (await ended.timeout(const Duration(seconds: 5))).gameResult?.winner,
+      restoredTerminal.gameResult?.winner,
       fixture.result.winner,
     );
     await _waitUntil(
